@@ -100,7 +100,9 @@ function tooltipText() {
 // 托盘图标取"最值得展示"的设备: 在线 > 成功读数 > 第一个在场
 function primaryIconState() {
   const l = deviceList();
-  const p = l.find((d) => d.ok && d.linked) || l.find((d) => d.ok) || l[0];
+  // vigil-watt 策略: 托盘显示在线设备中电量最低者(最低电量才是最紧急信号)
+  const online = l.filter((d) => d.ok && d.linked && d.battery !== null);
+  const p = online.length ? online.reduce((a, b) => (b.battery < a.battery ? b : a)) : (l.find((d) => d.ok) || l[0]);
   if (!p || !p.ok) return { battery: 0, charging: false, linked: false, ok: false, low: cfg.lowThreshold };
   return { ...p, low: cfg.lowThreshold };
 }

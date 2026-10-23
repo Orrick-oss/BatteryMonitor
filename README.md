@@ -13,7 +13,7 @@ Windows 外设电量常驻监视器 —— 纯 Node.js 实现，支持多品牌�
 ## 功能
 
 - **多设备并行查询**：每台设备独立协议引擎，插上自动识别，拔掉自动消失
-- **托盘常驻**：电池图标实时显示电量与状态（颜色跟随自定义阈值），图标角标区分鼠标/键盘
+- **托盘常驻**：贴片样式图标（状态色圆底 + 白色电量数字，模仿 vigil-watt；充电显闪电、离线显灰色），颜色跟随自定义阈值，图标顶部小徽标区分鼠标/键盘
 - **右键菜单**：实时读数、开机自启开关、打开状态页、立即刷新
 - **本地状态页**（`http://127.0.0.1:8787`）：每设备独立卡片、电量环、按真实时间轴的历史曲线
 - **低电量提醒**：阈值 1~99 自由设置，低于阈值弹 Windows 通知
@@ -21,7 +21,15 @@ Windows 外设电量常驻监视器 —— 纯 Node.js 实现，支持多品牌�
 - **每设备校准**：读数与设备显示有偏差时可在页面单独微调
 - **极低占用**：无 Electron，Node 单进程 + Rust 微型托盘（实测空闲 CPU < 0.2%，内存 ~60MB）
 
-## 使用
+## 下载使用
+
+去 [Releases](https://github.com/Orrick-oss/BatteryMonitor/releases) 下载：
+
+- **BatteryMonitor-vX.X.X-win-x64.zip**：免安装便携版。解压到任意位置 → 双击里面的 `Start.vbs` → 完成，无需任何运行环境。
+
+启动应用后，在任务栏通知区域找到电池图标；首次可能收在 `^` 溢出区，拖出来即可。右键图标可切换开机自启、查看各设备实时读数。
+
+## 源码运行
 
 ```bash
 cd app
@@ -29,8 +37,6 @@ npm install          # node-hid + systray2
 node daemon.js       # 启动服务 + 托盘
 node launch.js       # 或: 已在运行则只打开状态页
 ```
-
-开机自启：托盘右键 →「开机自启：已开启」。
 
 ## 设备探测工具
 
@@ -50,9 +56,9 @@ node aulatest.js     # AULA/Compx 协议真机探测
 
 协议细节参考了以下开源项目（仅本地对照研究，未随仓库分发）：
 
-- [FerrisPulse 灵脉](https://github.com/lasoadavhd/FerrisPulse)（Beken/ATK 协议）
-- [vigil-watt](https://github.com/evren-oct/vigil-watt)（AULA/迈从插件协议）
-- [offline-mchose](https://github.com/Offlinedd/offline-mchose)（迈从 legacy 协议文档）
+- [FerrisPulse 灵脉](https://github.com/Ferris-echo/FerrisPulse)（Beken/ATK 协议）
+- [vigil-watt](https://github.com/evren-oct/vigil-watt)（AULA/迈从插件协议；托盘贴片图标样式亦参考其设计）
+- [offline-mchose](https://github.com/Rapou7/offline-mchose)（迈从 legacy 协议文档）
 
 ## 已知限制
 
