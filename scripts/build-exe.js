@@ -1,0 +1,191 @@
+// 构建单文件 exe: 内嵌 app 载荷 + Node 运行时 (Node SEA)
+// 用法: node scripts/build-exe.js [版本号]
+// 产物: dist/BatteryMonitor.exe  (双击即用, 无需安装运行时)
+const fs = require('fs');
+const path = require('path');
+const zlib = require('zlib');
+const { execFileSync } = require('child_process');
+
+const ROOT = path.join(__dirname, '..');
+const APP = path.join(ROOT, 'app');
+const BUILD = path.join(ROOT, 'build');
+const STAGE = path.join(BUILD, 'stage');
+const DIST = path.join(ROOT, 'dist');
+const VER = process.argv[2] || JSON.parse(fs.readFileSync(path.join(APP, 'package.json'), 'utf8')).version;
+
+const NODE_SRC = process.env.NODE_EXE ||
+  'C:/Users/admin/.workbuddy/binaries/node/versions/22.22.2-6/node.exe';
+const TOOLS_JS = path.join(BUILD, 'tools', 'node_modules');
+const CLI = {
+  resedit: path.join(TOOLS_JS, 'resedit-cli', 'dist', 'cli.js'),
+  postject: path.join(TOOLS_JS, 'postject', 'dist', 'cli.js'),
+};
+
+const MAGIC = 'BMPKG2\0\0';
+
+function sh(cmd, args, opts = {}) {
+  return execFileSync(cmd, args, { stdio: 'inherit', cwd: ROOT, ...opts });
+}
+
+function copyDir(src, dest, skip) {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const name of fs.readdirSync(src)) {
+    if (skip && skip(name)) continue;
+    const s = path.join(src, name), d = path.join(dest, name);
+    const st = fs.statSync(s);
+    if (st.isDirectory()) copyDir(s, d, skip);
+    else if (st.isFile()) fs.copyFileSync(s, d);
+  }
+}
+
+// ---------- 1. 组装载荷 ----------
+console.log(`[1/6] 组装载荷 v${VER}`);
+fs.rmSync(STAGE, { recursive: true, force: true });
+fs.mkdirSync(STAGE, { recursive: true });
+
+// 代码文件(排除开发用脚本/运行时数据)
+const CODE = ['daemon.js', 'launch.js', 'hovercard.js', 'icongen.js', 'battery.js',
+  'package.json', 'config.json', 'battery.ico'];
+for (const f of CODE) {
+  const src = path.join(APP, f);
+  if (fs.existsSync(src)) fs.copyFileSync(src, path.join(STAGE, f));
+}
+// config.json 属本地用户配置(不入库), 缺失时给一份默认值
+if (!fs.existsSync(path.join(STAGE, 'config.json'))) {
+  fs.writeFileSync(path.join(STAGE, 'config.json'), JSON.stringify({
+    port: 8787, pollMs: 60000, batteryOffset: 0, lowThreshold: 20, autoOpen: false, offsets: {},
+  }, null, 2));
+}
+copyDir(path.join(APP, 'public'), path.join(STAGE, 'public'));
+
+// 依赖(剔除其它平台的预编译二进制, 只留 win32-x64)
+copyDir(path.join(APP, 'node_modules'), path.join(STAGE, 'node_modules'), (name) => name === '.bin');
+const PREBUILDS = path.join(STAGE, 'node_modules', 'node-hid', 'prebuilds');
+if (fs.existsSync(PREBUILDS)) {
+  for (const d of fs.readdirSync(PREBUILDS)) {
+    if (d !== 'HID-win32-x64') fs.rmSync(path.join(PREBUILDS, d), { recursive: true, force: true });
+  }
+}
+// 文档类文件不进包
+(function pruneDocs(dir) {
+  for (const name of fs.readdirSync(dir)) {
+    const p = path.join(dir, name);
+    const st = fs.statSync(p);
+    if (st.isDirectory()) { pruneDocs(p); continue; }
+    if (/\.(md|markdown|map|ts)$/i.test(name) || name === '.package-lock.json') fs.rmSync(p, { force: true });
+  }
+})(path.join(STAGE, 'node_modules'));
+
+// 体积统计
+let fileCount = 0, rawSize = 0;
+(function count(dir) {
+  for (const name of fs.readdirSync(dir)) {
+    const p = path.join(dir, name);
+    const st = fs.statSync(p);
+    if (st.isDirectory()) count(p);
+    else { fileCount++; rawSize += st.size; }
+  }
+})(STAGE);
+console.log(`      文件 ${fileCount} 个, 原始 ${(rawSize / 1048576).toFixed(1)}MB`);
+
+// ---------- 2. 打包 + 压缩 ----------
+console.log('[2/6] 生成内嵌载荷 payload.bin');
+function makeArchive(dir) {
+  const files = [];
+  (function walk(rel) {
+    for (const name of fs.readdirSync(path.join(dir, rel))) {
+      const r = rel ? rel + '/' + name : name;
+      const p = path.join(dir, r);
+      const st = fs.statSync(p);
+      if (st.isDirectory()) walk(r);
+      else if (st.isFile()) files.push({ rel: r, data: fs.readFileSync(p) });
+    }
+  })('');
+  const head = Buffer.alloc(12);
+  head.write(MAGIC, 0, 'latin1');
+  head.writeUInt32LE(files.length, 8);
+  const parts = [head];
+  for (const f of files) {
+    const relBuf = Buffer.from(f.rel, 'utf8');
+    const h = Buffer.alloc(2); h.writeUInt16LE(relBuf.length, 0);
+    const s = Buffer.alloc(4); s.writeUInt32LE(f.data.length, 0);
+    parts.push(h, relBuf, s, f.data);
+  }
+  return Buffer.concat(parts);
+}
+const archive = makeArchive(STAGE);
+const payload = zlib.gzipSync(archive, { level: 9 });
+fs.writeFileSync(path.join(BUILD, 'payload.bin'), payload);
+console.log(`      压缩后 ${(payload.length / 1048576).toFixed(1)}MB (压缩率 ${(100 - payload.length / archive.length * 100).toFixed(0)}%)`);
+
+// ---------- 3. 生成引导程序 + SEA 配置 ----------
+console.log('[3/6] 生成 SEA 引导程序');
+const stamp = `${VER}-${payload.length}`;
+const bootstrap = fs.readFileSync(path.join(__dirname, 'bootstrap.js'), 'utf8')
+  .replace('__BM_VERSION__', VER)
+  .replace('__BM_BUILD__', stamp);
+const bootstrapOut = path.join(BUILD, 'bootstrap.out.js');
+fs.writeFileSync(bootstrapOut, bootstrap);
+
+const seaConfig = path.join(BUILD, 'sea-config.json');
+fs.writeFileSync(seaConfig, JSON.stringify({
+  main: bootstrapOut,
+  output: path.join(BUILD, 'sea-prep.blob'),
+  assets: { 'payload.bin': path.join(BUILD, 'payload.bin') },
+  disableExperimentalSEAWarning: true,
+}, null, 2));
+
+if (!fs.existsSync(NODE_SRC)) {
+  console.error('找不到 node.exe: ' + NODE_SRC);
+  process.exit(1);
+}
+
+// ---------- 4. 生成 SEA blob ----------
+console.log('[4/6] 生成 SEA blob');
+sh(process.execPath, ['--experimental-sea-config', seaConfig]);
+
+// ---------- 5. 拼装 exe (图标/版本信息/注入) ----------
+console.log('[5/6] 拼装 exe');
+fs.mkdirSync(DIST, { recursive: true });
+const OUT = path.join(DIST, 'BatteryMonitor.exe');
+
+// 5a. 先写资源(图标+版本信息) —— 在干净的 node.exe 上做, 避免破坏 SEA 资源
+sh(process.execPath, [CLI.resedit,
+  '--in', NODE_SRC, '--out', OUT,
+  '--icon', '1,' + path.join(APP, 'battery.ico'),
+  '--product-name', 'BatteryMonitor',
+  '--company-name', 'BatteryMonitor',
+  '--file-version', VER + '.0',
+  '--product-version', VER + '.0',
+  '--ignore-signed',
+]);
+
+// 5b. 注入 SEA blob
+sh(process.execPath, [CLI.postject,
+  OUT, 'NODE_SEA_BLOB', path.join(BUILD, 'sea-prep.blob'),
+  '--sentinel-fuse', 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2',
+]);
+
+// 5c. PE 子系统 console(3) → windows(2): 双击不弹黑框
+const fd = fs.openSync(OUT, 'r+');
+const head = Buffer.alloc(64);
+fs.readSync(fd, head, 0, 64, 0);
+const peOff = head.readUInt32LE(0x3C);
+const sub = Buffer.alloc(2);
+fs.readSync(fd, sub, 0, 2, peOff + 0x5C);
+if (sub.readUInt16LE(0) === 3) {
+  sub.writeUInt16LE(2, 0);
+  fs.writeSync(fd, sub, 0, 2, peOff + 0x5C);
+  console.log('      子系统: console → windows (无黑框)');
+} else {
+  console.log('      子系统已是 ' + sub.readUInt16LE(0) + ' (跳过)');
+}
+fs.closeSync(fd);
+
+// ---------- 6. 汇总 ----------
+const finalSize = fs.statSync(OUT).size;
+console.log(`[6/6] 完成: ${OUT}`);
+console.log(`      体积 ${(finalSize / 1048576).toFixed(1)}MB`);
+fs.rmSync(STAGE, { recursive: true, force: true });
+fs.rmSync(path.join(BUILD, 'sea-prep.blob'), { force: true });
+fs.rmSync(path.join(BUILD, 'payload.bin'), { force: true });

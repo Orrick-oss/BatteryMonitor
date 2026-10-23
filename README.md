@@ -28,9 +28,23 @@ Windows 外设电量常驻监视器 —— 纯 Node.js 实现，支持多品牌�
 
 去 [Releases](https://github.com/Orrick-oss/BatteryMonitor/releases) 下载：
 
-- **BatteryMonitor-vX.X.X-win-x64.zip**：免安装便携版。解压到任意位置 → 双击里面的 `Start.vbs` → 完成，无需任何运行环境。
+- **BatteryMonitor.exe**（推荐，单文件）：下载后**双击即可运行**，无需安装、无需 Node 环境、无黑框窗口。首次启动会自动展开内部组件到 `%LOCALAPPDATA%\BatteryMonitor`（约 1 秒），之后秒开；升级新版本无需卸载，直接替换 exe。
 
 启动应用后，托盘区出现电量图标（显示电量最低设备的百分比；首次可能收在 `^` 溢出区，拖出来即可）。鼠标悬停图标弹出电量卡片，点击卡片或托盘菜单打开详情页，右键托盘可切换开机自启、查看各设备实时读数。
+
+> 卸载：托盘菜单退出 → 删除 exe → 删除 `%LOCALAPPDATA%\BatteryMonitor`（可选，含电量历史）。
+
+## 构建
+
+```bash
+# 单文件 exe → dist/BatteryMonitor.exe
+node scripts/build-exe.js 1.0.6        # 参数为版本号
+
+# 绿色便携包 → dist/BatteryMonitor-v1.0.6-win-x64.zip
+node scripts/build-release.js 1.0.6
+```
+
+单文件 exe 用 Node 官方 SEA（Single Executable Application）实现：把代码与依赖压成载荷内嵌进 node 运行时，启动时解包到 `%LOCALAPPDATA%` 再加载（原生模块 koffi/node-hid/托盘组件必须从真实磁盘路径加载，无法直接在内存中运行）。
 
 ## 源码运行
 

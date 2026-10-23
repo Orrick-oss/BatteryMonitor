@@ -13,3 +13,8 @@ references/
 Thumbs.db
 Desktop.ini
 dist/
+
+build/
+
+# 单文件构建产物(用 scripts/build-exe.js 生成)
+/BatteryMonitor.exe

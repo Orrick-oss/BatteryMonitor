@@ -188,10 +188,15 @@ const STARTUP_DIR = path.join(
   'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
 const STARTUP_VBS = path.join(STARTUP_DIR, 'BatteryMonitor.vbs');
 const OLD_STARTUP_VBS = path.join(STARTUP_DIR, 'A7 Pro 电量监视.vbs');
+// 单文件 exe 版(bootstrap 注入的 BM_VERSION)直接指向 exe; 源码版指向 launch.js
+const IS_SEA = !!process.env.BM_VERSION || !/node\.exe$/i.test(process.execPath);
 function startupVbsContent() {
+  const target = IS_SEA
+    ? `"${process.execPath}" --no-open`
+    : `"${process.execPath}" "${path.join(ROOT, 'launch.js')}" --no-open`;
   return `' BatteryMonitor 开机自启（由托盘右键菜单管理，请勿手动改名/移动）\n` +
     `' 隐藏启动: 服务已在运行则忽略, 不弹浏览器\n` +
-    `CreateObject("WScript.Shell").Run """${process.execPath}"" ""${path.join(ROOT, 'launch.js')}"" --no-open", 0, False\n`;
+    `CreateObject("WScript.Shell").Run "${target}", 0, False\n`;
 }
 let autoStartOn = false;
 function refreshAutoStart() {
@@ -203,6 +208,13 @@ function refreshAutoStart() {
       log('[自启] 已把旧启动项迁移为 BatteryMonitor.vbs');
     }
   } catch (e) { log('[自启] 迁移失败: ' + e.message); }
+  // 自愈: 自启脚本内容过期(如换成单文件 exe 版后路径变了)则按当前形态重写, 保留开启状态
+  try {
+    if (fs.existsSync(STARTUP_VBS) && fs.readFileSync(STARTUP_VBS, 'utf8') !== startupVbsContent()) {
+      fs.writeFileSync(STARTUP_VBS, startupVbsContent());
+      log('[自启] 已更新自启脚本路径');
+    }
+  } catch { }
   autoStartOn = fs.existsSync(STARTUP_VBS);
 }
 function setStartup(on) {
