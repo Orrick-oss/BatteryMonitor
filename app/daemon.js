@@ -9,6 +9,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { queryAll } = require('./battery');
 const { iconFor } = require('./icongen');
+const pill = require('./pill');
 
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, 'data');
@@ -167,6 +168,7 @@ async function poll(trigger = 'timer') {
     polling = false;
   }
   updateTray();
+  pill.notify(); // 贴片数据随轮询刷新
 }
 
 // 自适应轮询: 全部设备在线读数正常 → 60s 慢轮询; 有设备离线/休眠/未发现 → 12s 快速探测
@@ -386,6 +388,7 @@ server.listen(cfg.port, '127.0.0.1', () => {
   log(`状态页: http://127.0.0.1:${cfg.port}  (轮询 ${cfg.pollMs / 1000}s, 低电量阈值 ${cfg.lowThreshold}%)`);
   refreshAutoStart(); // 先读自启状态(含旧启动项迁移), 菜单首建时勾选态才正确
   initTray();
+  pill.init({ getData: deviceList, getLow: () => cfg.lowThreshold, url: `http://127.0.0.1:${cfg.port}` });
   poll('boot').then(() => {
     if (cfg.autoOpen || process.argv.includes('--open')) openBrowser();
     schedulePoll();
