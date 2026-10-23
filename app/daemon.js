@@ -286,8 +286,8 @@ function initTray() {
       }
       else if (t === '退出') { try { systray.kill(true); } catch { } process.exit(0); }
     });
-    // Win11 默认把新托盘图标折叠进隐藏区，启动后自动提升为可见
-    setTimeout(promoteTrayIcon, 2500);
+    // Win11 默认把新托盘图标折叠进隐藏区，启动后自动提升为常显
+    scheduleTrayPromote();
     startTrayWatchdog();
   } catch (e) {
     log('[托盘] 初始化失败(不影响其它功能): ' + e.message);
@@ -315,16 +315,56 @@ function startTrayWatchdog() {
 }
 
 // 把 NotifyIconSettings 中托盘二进制的 IsPromoted 置 1（尽力而为，失败不影响主流程）
-function promoteTrayIcon() {
-  if (process.platform !== 'win32') return;
-  const ps = "$b='HKCU:\\Control Panel\\NotifyIconSettings'; " +
-    "Get-ChildItem $b -ErrorAction SilentlyContinue | ForEach-Object { " +
-    "if ($_.GetValue('ExecutablePath') -like '*tray_windows_release.exe') { " +
-    "Set-ItemProperty $_.PSPath -Name IsPromoted -Value 1 -Type DWord } }";
+// Win11 默认把新托盘图标折叠进隐藏区(^)。写 NotifyIconSettings\IsPromoted=1 可让其常显,
+// 但该值只在图标"注册那一刻"读取 —— 所以写完必须重建一次托盘才生效。
+let trayPromoteRestarted = false;
+function promoteTrayIconOnce() {
+  if (process.platform !== 'win32') return false;
+  const { execFileSync } = require('child_process');
+  let out = '';
   try {
-    spawn('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', ps],
-      { detached: true, stdio: 'ignore', windowsHide: true }).unref();
-  } catch { }
+    out = execFileSync('reg', ['query', 'HKCU\\Control Panel\\NotifyIconSettings', '/s', '/v', 'ExecutablePath'],
+      { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+  } catch { return false; }
+  const helperDir = path.join(ROOT, 'node_modules', 'systray2', 'traybin').toLowerCase();
+  const keys = [];
+  let cur = null;
+  for (const raw of out.split(/\r?\n/)) {
+    const t = raw.trim();
+    if (/^HKEY_/i.test(t)) { cur = t; continue; }
+    if (cur && /tray_windows_release\.exe/i.test(t) && t.toLowerCase().includes(helperDir)) keys.push(cur);
+  }
+  let changed = false;
+  for (const k of keys) {
+    try {
+      const v = execFileSync('reg', ['query', k, '/v', 'IsPromoted'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+      if (/0x1$|REG_DWORD\s+1$/m.test(v)) continue; // 已是常显
+    } catch { } // 值不存在 → 需要写
+    try {
+      execFileSync('reg', ['add', k, '/v', 'IsPromoted', '/t', 'REG_DWORD', '/d', '1', '/f'],
+        { stdio: 'ignore', windowsHide: true, timeout: 5000 });
+      changed = true;
+    } catch { }
+  }
+  return changed;
+}
+function restartTray() {
+  try { systray.kill(false); } catch { }
+  systray = null;
+  setTimeout(initTray, 400);
+}
+// 首次运行时注册表项可能还没生成, 多次重试; 一旦写入成功就重建托盘让它立刻可见
+function scheduleTrayPromote() {
+  for (const delay of [2500, 7000, 15000]) {
+    setTimeout(() => {
+      if (trayPromoteRestarted) return;
+      if (promoteTrayIconOnce()) {
+        trayPromoteRestarted = true;
+        log('[托盘] 已把图标从折叠区提升为常显');
+        restartTray();
+      }
+    }, delay);
+  }
 }
 let lastIconKey = '';
 function updateTray() {
