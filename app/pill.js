@@ -1,8 +1,10 @@
-// 任务栏电量贴片: 真嵌进任务栏(Shell_TrayWnd 子窗口), 分层窗口 UpdateLayeredWindow 提交
-// GDI+ 抗锯齿 ARGB 位图。实现要点参考 vigil-watt TaskbarPillWindow (MIT):
-//   - SetParent + WS_CHILD 化 + WS_EX_LAYERED 三道锁
-//   - Win11 会吃掉子窗口鼠标消息 → 轮询 GetAsyncKeyState 检测点击
-//   - explorer 重建任务栏时子窗口随之销毁 → tick 里检查并整体重建
+// 任务栏电量贴片: TOPMOST 顶层分层窗口, 视觉上盖在任务栏托盘区左侧。
+// GDI+ 抗锯齿 ARGB 位图 + UpdateLayeredWindow 提交。
+// ⚠ 架构红线: 绝不 SetParent 到任务栏! 跨进程 SetParent 强制共享输入队列,
+//   node 事件循环一停顿 explorer 就挂死(v1.0.3 事故: AppHangXProcB1 任务栏整条冻结)。
+//   改为独立顶层窗口 + 周期重申置顶 + 全屏应用时自动隐藏。
+// 其他要点: Win11 吃鼠标消息 → 轮询 GetAsyncKeyState 检测点击;
+//   explorer 重建任务栏时自动重新定位; 分层窗口 alpha=0 区域鼠标穿透。
 // 本实现: koffi 3(预编译 FFI, 免编译器) + GDI+ 扁平 API, 跑在 daemon 进程内(零新进程),
 // 数据直接来自 daemon 内存。
 // koffi 3 用法要点: 结构体参数直接传普通 JS 对象(出参会被原地填充); 回调用
@@ -71,6 +73,7 @@ function setup(opts) {
     ReleaseDC: user32.func('int32 ReleaseDC(void *h, void *hdc)'),
     GetAsyncKeyState: user32.func('int16 GetAsyncKeyState(int32 key)'),
     GetCursorPos: user32.func('int GetCursorPos(_Out_ PillPOINT *p)'),
+    GetForegroundWindow: user32.func('void *GetForegroundWindow()'),
     SetProcessDPIAware: user32.func('int SetProcessDPIAware()'),
     ShellExecuteW: shell32.func('void *ShellExecuteW(void *h, str16 verb, str16 file, str16 args, str16 dir, int32 show)'),
     CreateCompatibleDC: gdi32.func('void *CreateCompatibleDC(void *hdc)'),
@@ -127,7 +130,7 @@ function setup(opts) {
     if (m) light = parseInt(m[1], 16) === 1;
   } catch { }
 
-  S = { fn: F, G, light, opts, hwnd: null, taskbar: null, hdcScreen: null, hdcMem: null, fontFamily: null, font: null, fontPx: 0, strFormat: null, measureBmp: null, measureGfx: null };
+  S = { fn: F, G, light, opts, hwnd: null, taskbar: null, hdcScreen: null, hdcMem: null, fontFamily: null, font: null, fontPx: 0, strFormat: null, measureBmp: null, measureGfx: null, lastSig: null, hidden: false, topTick: 0 };
 
   if (!EnsureWindow()) { log('窗口创建失败(任务栏未找到)'); return false; }
   tickTimer = setInterval(Tick, 300);
@@ -143,25 +146,24 @@ function EnsureWindow() {
   S.taskbar = F.FindWindowW('Shell_TrayWnd', null);
   if (!S.taskbar || !F.IsWindow(S.taskbar)) return false;
 
-  // 清理可能存在的孤儿窗口(上次异常退出残留)
+  // 清理可能存在的孤儿窗口(上次异常退出残留) —— 现在是顶层窗口, 按标题找
   for (let i = 0; i < 5; i++) {
-    const orphan = F.FindWindowExW(S.taskbar, null, 'Static', 'BatteryMonitorPill');
+    const orphan = F.FindWindowW(null, 'BatteryMonitorPill');
     if (!orphan) break;
-    try { F.DestroyWindow(orphan); } catch { break; }
+    try { if (!F.DestroyWindow(orphan)) break; } catch { break; }
   }
 
-  const WS_POPUP = 0x80000000, WS_CHILD = 0x40000000, WS_VISIBLE = 0x10000000;
-  const WS_EX_LAYERED = 0x80000, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x8000000;
-  const hwnd = F.CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-    'Static', 'BatteryMonitorPill', WS_POPUP,
-    0, 0, 1, 1, null, null, null, null);
+  // 顶层独立窗口 —— 绝不 SetParent 到任务栏!
+  // 跨进程 SetParent 会强制两进程共享输入队列, node 事件循环一停顿 explorer 就挂死
+  // (v1.0.3 致命教训: AppHangXProcB1, 任务栏整条冻结)。
+  // TOPMOST 保证盖在任务栏上, 视觉等同嵌入; 分层窗口 alpha=0 区域自动鼠标穿透。
+  const WS_POPUP = 0x80000000, WS_VISIBLE = 0x10000000;
+  const WS_EX_LAYERED = 0x80000, WS_EX_TOOLWINDOW = 0x80, WS_EX_NOACTIVATE = 0x8000000, WS_EX_TOPMOST = 0x8;
+  const hwnd = F.CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
+    'Static', 'BatteryMonitorPill', WS_POPUP | WS_VISIBLE,
+    -32000, -32000, 1, 1, null, null, null, null); // 先放屏外, Render 时定位
   if (!hwnd) return false;
-  F.SetParent(hwnd, S.taskbar);
-  let style = F.GetWindowLongW(hwnd, -16);
-  style = (style & 0x7FFFFFFF) | WS_CHILD | WS_VISIBLE; // 去 WS_POPUP(高位), 换 WS_CHILD
-  F.SetWindowLongW(hwnd, -16, style);
   S.hwnd = hwnd;
-  F.ShowWindow(hwnd, 4); // SW_SHOWNOACTIVATE
   return true;
 }
 
@@ -178,18 +180,33 @@ function Tick() {
   }
   prevDown = down;
 
-  // 状态签名: 数据/托盘位置/任务栏高度 任一变化才重画(空闲时几乎零开销)
+  // 周期性重申置顶(~3s 一次): explorer 常自行重申任务栏置顶, 会把贴片压到任务栏下面
+  if (!S.hidden && (++S.topTick >= 10)) {
+    S.topTick = 0;
+    try { F.SetWindowPos(S.hwnd, -1 /*HWND_TOPMOST*/, 0, 0, 0, 0, 0x13 /*NOSIZE|NOMOVE|NOACTIVATE*/); } catch { }
+  }
+
+  // 状态签名: 数据/托盘位置/任务栏高度/全屏状态 任一变化才重画(空闲时几乎零开销)
   let tnL = -1, tbB = 0;
   const tn = F.FindWindowExW(S.taskbar, null, 'TrayNotifyWnd', null);
   if (tn) { const t = { L: 0, T: 0, R: 0, B: 0 }; F.GetWindowRect(tn, t); tnL = t.L; }
   const tb = { L: 0, T: 0, R: 0, B: 0 }; F.GetWindowRect(S.taskbar, tb);
   tbB = tb.B - tb.T;
-  let sig = tnL + '|' + tbB + '|' + S.light + '|';
+  // 全屏检测: 前台窗口盖住整个任务栏 → 全屏应用, 贴片隐藏(任务栏都藏了, 贴片别露脸)
+  let fs = 0;
+  const fg = F.GetForegroundWindow();
+  if (fg) {
+    const fr = { L: 0, T: 0, R: 0, B: 0 }; F.GetWindowRect(fg, fr);
+    if (fr.L <= tb.L && fr.T <= tb.T && fr.R >= tb.R && fr.B >= tb.B) fs = 1;
+  }
+  let sig = tnL + '|' + tbB + '|' + fs + '|' + S.light + '|';
   for (const d of (S.opts.getData() || [])) {
     sig += (d.key || '') + ',' + (d.ok ? 1 : 0) + ',' + (d.linked ? 1 : 0) + ',' + (d.charging ? 1 : 0) + ',' + d.battery + ';';
   }
   if (sig === S.lastSig) return;
   S.lastSig = sig;
+  if (fs) { F.ShowWindow(S.hwnd, 0); S.hidden = true; return; }
+  if (S.hidden) { F.ShowWindow(S.hwnd, 4); S.hidden = false; }
   Render();
 }
 
@@ -201,7 +218,7 @@ function Render() {
   const tb = { L: 0, T: 0, R: 0, B: 0 }, cb = { L: 0, T: 0, R: 0, B: 0 };
   F.GetWindowRect(S.taskbar, tb);
   F.GetClientRect(S.taskbar, cb);
-  if ((tb.R - tb.L) < (tb.B - tb.T)) { F.SetWindowPos(S.hwnd, null, 0, 0, 0, 0, 0x14); return; } // 竖排任务栏不显示
+  if ((tb.R - tb.L) < (tb.B - tb.T)) { F.SetWindowPos(S.hwnd, null, -32000, -32000, 1, 1, 0x14); return; } // 竖排任务栏不显示
   const pillH = Math.max(22, Math.min(44, cb.B - 8));
 
   // 数据(直接来自 daemon 内存)
@@ -237,13 +254,13 @@ function Render() {
   if (extra) x += Measure(null, extra);
   const pillW = Math.max(Math.ceil(x - sep * 2 + pad), pillH + 8);
 
-  // 定位: TrayNotifyWnd 左侧(子窗口坐标 = 任务栏客户区坐标; 客户区原点即任务栏屏幕原点)
+  // 定位: TrayNotifyWnd 左侧 —— 顶层窗口直接用屏幕坐标
   const tr = { L: 0, T: 0, R: 0, B: 0 };
   const trayH = F.FindWindowExW(S.taskbar, null, 'TrayNotifyWnd', null);
   let px;
-  if (trayH) { F.GetWindowRect(trayH, tr); px = tr.L - tb.L - pillW - 6; }
-  else px = cb.R - pillW - 6;
-  const py = Math.floor((cb.B - pillH) / 2);
+  if (trayH) { F.GetWindowRect(trayH, tr); px = tr.L - pillW - 6; }
+  else px = tb.R - pillW - 6;
+  const py = tb.T + Math.floor((cb.B - pillH) / 2);
   F.SetWindowPos(S.hwnd, null, px, py, pillW, pillH, 0x14); // SWP_NOZORDER|SWP_NOACTIVATE
 
   // ---- GDI+ 绘制 ARGB 位图 ----
