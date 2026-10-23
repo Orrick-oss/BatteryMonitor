@@ -42,17 +42,19 @@ function encodePNG(width, height, rgba) {
 }
 
 // ---------- 电量图标绘制 64x64（返回 RGBA 像素） ----------
-// 样式模仿 vigil-watt 托盘贴片: 状态色实心圆 + 白色粗体数字, 充电画自绘闪电,
-// 离线灰色圆 + 短横线; 圆顶部保留设备类型小徽标(鼠标/键盘), 充电时让位给闪电。
+// 样式: 横向圆角贴片(浅灰底) + 深色设备图形 + 彩色粗体百分比, 多设备竖线分隔,
+// 参考 vigil-watt TaskbarPillRenderer 的任务栏贴片视觉。
 const hex = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16), 255];
-// vigil-watt UiPalette 配色: Charging/Low/Good/Offline
-const C_CHARGING = hex('#0A84FF');
-const C_LOW = hex('#E2445C');
-const C_GOOD = hex('#34C759');
-const C_OFFLINE = hex('#8E8E93');
-const WHITE = [255, 255, 255, 255];
+const PILL_BG = hex('#E9E9E7');     // 贴片底(浅灰, 深浅色任务栏上都有对比)
+const GLYPH = hex('#5F5E5A');       // 设备图形深灰(vigil-watt light IconStroke)
+const DIVIDER = hex('#B9B9B6');     // 分隔线
+// 文字状态色(在浅底上取略深一档保证对比)
+const T_GOOD = hex('#16A34A');
+const T_LOW = hex('#DC2626');
+const T_CHARGING = hex('#0A84FF');
+const T_OFFLINE = hex('#8E8E93');
 
-// 3x5 像素数字字体(白色, 4px 放大)
+// 3x5 像素字体
 const DIGITS = {
   '0': ['111', '101', '101', '101', '111'],
   '1': ['010', '110', '010', '010', '111'],
@@ -64,10 +66,12 @@ const DIGITS = {
   '7': ['111', '001', '010', '010', '010'],
   '8': ['111', '101', '111', '101', '111'],
   '9': ['111', '101', '111', '001', '111'],
+  '%': ['110', '001', '010', '100', '011'],
   '-': ['000', '000', '111', '000', '000'],
 };
 
-function drawRGBA({ pct = null, color = '#34C759', charging = false, online = true, kind = null } = {}) {
+// 贴片图标: chips = [{ battery, charging, online, kind }] (最多取 2 个)
+function drawRGBA({ chips = [], low = 20 } = {}) {
   const S = 64;
   const px = Buffer.alloc(S * S * 4);
   const set = (x, y, c) => {
@@ -76,36 +80,19 @@ function drawRGBA({ pct = null, color = '#34C759', charging = false, online = tr
     px[i] = c[0]; px[i + 1] = c[1]; px[i + 2] = c[2]; px[i + 3] = c[3];
   };
   const rect = (x0, y0, x1, y1, c) => { for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) set(x, y, c); };
-  // 实心圆(带边缘锯齿柔化: 边缘圈像素半透明)
-  const circle = (cx, cy, r, c) => {
-    for (let y = Math.floor(cy - r); y <= Math.ceil(cy + r); y++) {
-      for (let x = Math.floor(cx - r); x <= Math.ceil(cx + r); x++) {
-        const d = Math.hypot(x - cx, y - cy);
-        if (d <= r - 1) set(x, y, c);
-        else if (d <= r) set(x, y, [c[0], c[1], c[2], Math.round(c[3] * (r - d))]); // 边缘渐隐
-      }
+  // 圆角矩形(角部像素柔化)
+  const rrect = (x0, y0, x1, y1, r, c) => {
+    for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+      const dx = Math.max(x0 + r - x, 0, x - (x1 - r));
+      const dy = Math.max(y0 + r - y, 0, y - (y1 - r));
+      const d = Math.hypot(dx, dy);
+      if (d <= r - 1) set(x, y, c);
+      else if (d <= r) set(x, y, [c[0], c[1], c[2], Math.round(c[3] * (r - d))]);
     }
   };
-  // 多边形扫描填充(even-odd, vigil-watt DrawBolt 的闪电形状)
-  const polygon = (pts, c) => {
-    const ys = pts.map((p) => p[1]);
-    for (let y = Math.floor(Math.min(...ys)); y <= Math.ceil(Math.max(...ys)); y++) {
-      const xs = [];
-      for (let i = 0; i < pts.length; i++) {
-        const [x1, y1] = pts[i], [x2, y2] = pts[(i + 1) % pts.length];
-        if ((y1 <= y && y2 > y) || (y2 <= y && y1 > y)) xs.push(x1 + (y - y1) * (x2 - x1) / (y2 - y1));
-      }
-      xs.sort((a, b) => a - b);
-      for (let i = 0; i + 1 < xs.length; i += 2) {
-        for (let x = Math.round(xs[i]); x <= Math.round(xs[i + 1]); x++) set(x, y, c);
-      }
-    }
-  };
-  // 数字串绘制: 3x5 字形放大 cell 倍, 水平居中于 cx, 垂直居中于 cy
-  const drawText = (text, cell, cx, cy, c) => {
-    const dw = text.length * (3 * cell) + (text.length - 1) * cell;
-    const dh = 5 * cell;
-    let x0 = Math.round(cx - dw / 2), y0 = Math.round(cy - dh / 2);
+  // 文本绘制: 水平起点 x0, 垂直居中 cy
+  const drawText = (text, cell, x0, cy, c) => {
+    const dh = 5 * cell, y0 = Math.round(cy - dh / 2);
     for (const ch of text) {
       const g = DIGITS[ch];
       if (!g) { x0 += 4 * cell; continue; }
@@ -115,39 +102,63 @@ function drawRGBA({ pct = null, color = '#34C759', charging = false, online = tr
       x0 += 4 * cell;
     }
   };
-
-  // ---- 圆底: 状态色 ----
-  const base = online ? (charging ? C_CHARGING : hex(color)) : C_OFFLINE;
-  circle(32, 32, 29, base);
-
-  if (!online) {
-    drawText('-', 5, 32, 33, WHITE); // 短横线(即 vigil-watt 的 "–")
-  } else if (charging) {
-    // 闪电: vigil-watt DrawBolt 多边形(w=7,h=11 归一化坐标), 白色
-    const w = 20, h = 32, x = 32 - w / 2, y = 16;
-    const P = (fx, fy) => [x + fx * w, y + fy * h];
-    polygon([P(.58, 0), P(0, .56), P(.42, .56), P(.30, 1), P(1, .42), P(.54, .42)], WHITE);
-  } else {
-    const num = Number.isFinite(pct) ? String(Math.round(pct)) : '-';
-    // 顶部设备类型小徽标(有类型且数字不超两位时才画, 避免拥挤)
-    const showKind = (kind === 'mouse' || kind === 'keyboard') && num.length <= 2;
-    const textCY = showKind ? 39 : 32;
-    if (showKind) {
-      if (kind === 'mouse') {
-        // 胶囊轮廓 + 分界线 (x27-37, y12-26)
-        for (let x = 27; x <= 37; x++) { set(x, 12, WHITE); set(x, 26, WHITE); }
-        for (let y = 12; y <= 26; y++) { set(27, y, WHITE); set(37, y, WHITE); }
-        for (let y = 13; y <= 19; y++) set(32, y, WHITE);
-      } else {
-        // 键盘轮廓 + 键点 + 空格 (x22-42, y14-24)
-        for (let x = 22; x <= 42; x++) { set(x, 14, WHITE); set(x, 24, WHITE); }
-        for (let y = 14; y <= 24; y++) { set(22, y, WHITE); set(42, y, WHITE); }
-        for (const ry of [17, 20]) for (let x = 25; x <= 39; x += 4) set(x, ry, WHITE);
-        rect(27, 22, 37, 22, WHITE);
-      }
+  const textW = (text, cell) => text.length * 4 * cell - cell;
+  // 设备图形(深灰轮廓)
+  const drawGlyph = (kind, cx, cy) => {
+    if (kind === 'mouse') {
+      // 胶囊轮廓 + 分界线
+      const w = 9, h = 15, x0 = Math.round(cx - w / 2), y0 = Math.round(cy - h / 2), x1 = x0 + w - 1, y1 = y0 + h - 1;
+      for (let x = x0 + 1; x <= x1 - 1; x++) { set(x, y0, GLYPH); set(x, y1, GLYPH); }
+      for (let y = y0 + 1; y <= y1 - 1; y++) { set(x0, y, GLYPH); set(x1, y, GLYPH); }
+      set(x0, y0 + 1, GLYPH); set(x1, y0 + 1, GLYPH); set(x0, y1 - 1, GLYPH); set(x1, y1 - 1, GLYPH);
+      for (let y = y0 + 2; y <= y0 + 5; y++) set(Math.round(cx), y, GLYPH);
+    } else if (kind === 'keyboard') {
+      // 外框 + 键点行 + 空格条
+      const w = 17, h = 11, x0 = Math.round(cx - w / 2), y0 = Math.round(cy - h / 2), x1 = x0 + w - 1, y1 = y0 + h - 1;
+      for (let x = x0; x <= x1; x++) { set(x, y0, GLYPH); set(x, y1, GLYPH); }
+      for (let y = y0; y <= y1; y++) { set(x0, y, GLYPH); set(x1, y, GLYPH); }
+      for (let x = x0 + 2; x <= x1 - 2; x += 3) set(x, y0 + 3, GLYPH);
+      rect(x0 + 3, y1 - 3, x1 - 3, y1 - 3, GLYPH);
+    } else {
+      // 其他类型: 电池轮廓 + 凸头
+      const w = 16, h = 10, x0 = Math.round(cx - w / 2), y0 = Math.round(cy - h / 2), x1 = x0 + w - 1, y1 = y0 + h - 1;
+      for (let x = x0; x <= x1; x++) { set(x, y0, GLYPH); set(x, y1, GLYPH); }
+      for (let y = y0; y <= y1; y++) { set(x0, y, GLYPH); set(x1, y, GLYPH); }
+      rect(x1 + 1, y0 + 3, x1 + 2, y1 - 3, GLYPH);
     }
-    const cell = num.length >= 3 ? 4 : 5; // 100% 三位数缩小一号
-    drawText(num, cell, 32, textCY, WHITE);
+  };
+  const stateColor = (d) => !d.online ? T_OFFLINE
+    : d.charging ? T_CHARGING
+      : (Number.isFinite(d.battery) && d.battery <= low) ? T_LOW : T_GOOD;
+
+  // ---- 贴片底 ----
+  rrect(1, 1, S - 2, S - 2, 14, PILL_BG);
+  const list = chips.slice(0, 2);
+  const cy = 32;
+
+  if (list.length === 0) {
+    drawText('-', 4, 22, cy, T_OFFLINE);
+  } else   if (list.length === 1) {
+    // 单设备: [图形] NN%
+    const d = list[0];
+    const num = d.online && Number.isFinite(d.battery) ? String(Math.round(d.battery)) + '%' : '-';
+    const gw = 17, gap = 5;
+    // 字号自适应: 优先 cell=4, 放不下降为 3/2, 保证图形+文本都在贴片内
+    let cell = 4;
+    while (cell > 1 && gw + gap + textW(num, cell) > S - 6) cell--;
+    const tw = textW(num, cell);
+    const total = gw + gap + tw;
+    drawGlyph(d.kind, 1 + gw / 2, cy);
+    drawText(num, cell, 1 + total + 2 - tw, cy, stateColor(d));
+  } else {
+    // 双设备: NN │ NN (无 % 号保证可读)
+    const nums = list.map((d) => d.online && Number.isFinite(d.battery) ? String(Math.round(d.battery)) : '-');
+    const cell = 3, cw = textW('00', cell);
+    const gap = 7, total = cw * 2 + gap;
+    let x0 = Math.round((S - total) / 2);
+    drawText(nums[0], cell, x0, cy, stateColor(list[0]));
+    rect(Math.round(S / 2) - 1, cy - 8, Math.round(S / 2) - 1, cy + 8, DIVIDER);
+    drawText(nums[1], cell, x0 + cw + gap, cy, stateColor(list[1]));
   }
   return { S, px };
 }
@@ -221,23 +232,27 @@ function downsample(rgba, w, factor) {
 }
 
 // 状态 → 图标缓存（Windows 托盘要求 ICO 格式，见 systray2 README）
+// devices: [{ battery, charging, linked, ok, kind }] — 贴片最多显示 2 个设备
 const cache = new Map();
-function iconFor(state) {
-  const low = Number.isFinite(state.low) ? state.low : 20; // 跟随用户自定义阈值, 不再硬编码分档
-  const online = !!state.linked && !!state.ok;
-  // vigil-watt 配色: 充电蓝 / ≤阈值红 / 其余绿; 离线灰由 drawRGBA 内部处理
-  let color = '#34C759';
-  if (online && !state.charging && state.battery <= low) color = '#E2445C';
-  else if (online && state.charging) color = '#0A84FF';
-  const num = online && Number.isFinite(state.battery) ? String(Math.round(state.battery)) : '-';
-  const key = [num, color, state.charging ? 'c' : '', online ? 'on' : 'off', state.kind || '', low].join('|');
+function iconFor(devices, low = 20) {
+  const list = Array.isArray(devices) ? devices : [devices];
+  const chips = list
+    .filter((d) => d && d.present !== false)
+    .map((d) => ({
+      battery: d.battery, charging: !!d.charging,
+      online: !!d.ok && !!d.linked, kind: d.kind || null,
+    }))
+    .sort((a, b) => kindOrder(a.kind) - kindOrder(b.kind))
+    .slice(0, 2);
+  const key = JSON.stringify([chips, low]);
   if (!cache.has(key)) {
-    const { S, px } = drawRGBA({ pct: state.battery, color, charging: state.charging, online, kind: state.kind });
+    const { S, px } = drawRGBA({ chips, low });
     // 托盘用 32x32（64 降采样更锐利），ICO 格式
     cache.set(key, encodeICO(S / 2, S / 2, downsample(px, S, 2)).toString('base64'));
   }
   return cache.get(key);
 }
+const kindOrder = (k) => (k === 'keyboard' ? 0 : k === 'mouse' ? 1 : 2);
 
 // 生成 64x64 ICO（桌面快捷方式 battery.ico 用）
 function fullSizeICO(state) {
@@ -250,13 +265,14 @@ module.exports = { iconFor, fullSizeICO, encodePNG, encodeICO, drawRGBA, downsam
 // CLI 预览: node icongen.js → 生成 sample-*.png / sample-*.ico
 if (require.main === module) {
   const fs = require('fs');
+  const D = (battery, charging, kind, online = true) => ({ battery, charging, online, kind });
   const samples = [
-    ['high', { pct: 91, color: '#34C759', charging: false, online: true, kind: 'mouse' }],
-    ['mid', { pct: 45, color: '#34C759', charging: false, online: true, kind: 'keyboard' }],
-    ['low', { pct: 15, color: '#E2445C', charging: false, online: true, kind: 'mouse' }],
-    ['charging', { pct: 66, color: '#0A84FF', charging: true, online: true, kind: 'keyboard' }],
-    ['offline', { pct: 0, color: '#8E8E93', charging: false, online: false, kind: 'mouse' }],
-    ['full', { pct: 100, color: '#34C759', charging: false, online: true, kind: 'keyboard' }],
+    ['two', { chips: [D(74, false, 'keyboard'), D(90, false, 'mouse')], low: 20 }],
+    ['low', { chips: [D(15, false, 'mouse'), D(90, false, 'keyboard')], low: 20 }],
+    ['charging', { chips: [D(66, true, 'mouse'), D(90, false, 'keyboard')], low: 20 }],
+    ['single', { chips: [D(91, false, 'mouse')], low: 20 }],
+    ['offline', { chips: [D(null, false, 'mouse', false), D(90, false, 'keyboard')], low: 20 }],
+    ['full', { chips: [D(100, false, 'keyboard'), D(90, false, 'mouse')], low: 20 }],
   ];
   for (const [name, s] of samples) {
     const { S, px } = drawRGBA(s);

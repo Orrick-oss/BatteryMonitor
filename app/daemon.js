@@ -98,15 +98,6 @@ function tooltipText() {
 }
 
 // 托盘图标取"最值得展示"的设备: 在线 > 成功读数 > 第一个在场
-function primaryIconState() {
-  const l = deviceList();
-  // vigil-watt 策略: 托盘显示在线设备中电量最低者(最低电量才是最紧急信号)
-  const online = l.filter((d) => d.ok && d.linked && d.battery !== null);
-  const p = online.length ? online.reduce((a, b) => (b.battery < a.battery ? b : a)) : (l.find((d) => d.ok) || l[0]);
-  if (!p || !p.ok) return { battery: 0, charging: false, linked: false, ok: false, low: cfg.lowThreshold };
-  return { ...p, low: cfg.lowThreshold };
-}
-
 function checkLowBattery(ds) {
   const active = ds.ok && ds.linked && !ds.charging && !ds.full && ds.battery !== null;
   if (active && ds.battery <= cfg.lowThreshold && !ds.lowAlerted) {
@@ -231,6 +222,7 @@ const ACTION_ITEMS = [
 ];
 function buildMenu() {
   // 每台在场设备一行实时读数(灰色不可点), 中间是可勾选的设置, 下面才是操作项
+  // 图标: 横向贴片(全部在场设备并排, 见 icongen.js)
   const rows = deviceList().filter((d) => d.present !== false).map((d) => ({
     title: d.ok && d.battery !== null
       ? `${KIND_LABEL[d.kind] || '设备'} · ${d.device}  ${d.battery}%${d.charging ? ' ⚡' : d.full ? ' 🔋' : ''}`
@@ -243,7 +235,7 @@ function buildMenu() {
     tooltip: '点击切换开机自动启动',
     checked: autoStartOn, enabled: true,
   };
-  return { icon: iconFor(primaryIconState()), title: 'BatteryMonitor', tooltip: tooltipText(), items: [...rows, toggle, ...ACTION_ITEMS] };
+  return { icon: iconFor(deviceList(), cfg.lowThreshold), title: 'BatteryMonitor', tooltip: tooltipText(), items: [...rows, toggle, ...ACTION_ITEMS] };
 }
 function initTray() {
   if (process.argv.includes('--no-tray')) return;
