@@ -1,9 +1,29 @@
-# 任务栏截图工具 (ctypes + GDI, 零依赖, 输出 BMP)
+# 任务栏截图工具 (ctypes + GDI, 零依赖, 输出 BMP / PNG)
 import ctypes, ctypes.wintypes as wt
-import sys
+import sys, zlib, struct
 
 gdi32 = ctypes.windll.gdi32
 user32 = ctypes.windll.user32
+
+
+def write_png(path, w, h, rows_bgr):
+    raw = bytearray()
+    for r in range(h):
+        line = rows_bgr[r]
+        raw.append(0)                       # filter: none
+        px = bytearray(line[: w * 3])       # BGR
+        px[0::3], px[2::3] = line[2 : w * 3 : 3], line[0 : w * 3 : 3]  # → RGB
+        raw += px
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+
+    png = b"\x89PNG\r\n\x1a\n"
+    png += chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+    png += chunk(b"IEND", b"")
+    with open(path, "wb") as f:
+        f.write(png)
 
 def capture(x, y, w, h, out):
     hdc_screen = user32.GetDC(0)
@@ -33,6 +53,13 @@ def capture(x, y, w, h, out):
     # BMP 文件: 14B header + 40B info + 像素(BGR, 底行在前)
     pixels = bytearray(buf.raw)
     rows = [pixels[r * row:(r + 1) * row] for r in range(h)]
+    if out.lower().endswith(".png"):
+        write_png(out, w, h, rows)
+        gdi32.DeleteObject(hbm)
+        gdi32.DeleteDC(hdc_mem)
+        user32.ReleaseDC(0, hdc_screen)
+        print("saved", out)
+        return
     bmp_body = b"".join(reversed(rows))
     size = 54 + len(bmp_body)
     header = bytearray(54)

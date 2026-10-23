@@ -9,7 +9,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const { queryAll } = require('./battery');
 const { iconFor } = require('./icongen');
-const pill = require('./pill');
+const hovercard = require('./hovercard');
 
 const ROOT = __dirname;
 const DATA_DIR = path.join(ROOT, 'data');
@@ -168,7 +168,7 @@ async function poll(trigger = 'timer') {
     polling = false;
   }
   updateTray();
-  pill.notify(); // 贴片数据随轮询刷新
+  hovercard.notify(); // 悬浮卡片数据随轮询刷新
 }
 
 // 自适应轮询: 全部设备在线读数正常 → 60s 慢轮询; 有设备离线/休眠/未发现 → 12s 快速探测
@@ -222,6 +222,18 @@ const ACTION_ITEMS = [
   { title: '立即刷新', tooltip: '马上查询一次电量' },
   { title: '退出', tooltip: '退出 BatteryMonitor' },
 ];
+// 任务栏明暗主题(托盘图标数字配色 + 悬浮卡片配色都跟随)
+let darkTheme = false;
+function refreshTheme() {
+  try {
+    const out = require('child_process').execSync(
+      'reg query "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize" /v AppsUseLightTheme',
+      { timeout: 3000, windowsHide: true }).toString();
+    const m = out.match(/AppsUseLightTheme\s+REG_DWORD\s+0x([0-9a-f]+)/i);
+    if (m) darkTheme = parseInt(m[1], 16) === 0;
+  } catch { }
+}
+
 function buildMenu() {
   // 每台在场设备一行实时读数(灰色不可点), 中间是可勾选的设置, 下面才是操作项
   // 图标: 横向贴片(全部在场设备并排, 见 icongen.js)
@@ -237,7 +249,7 @@ function buildMenu() {
     tooltip: '点击切换开机自动启动',
     checked: autoStartOn, enabled: true,
   };
-  return { icon: iconFor(deviceList(), cfg.lowThreshold), title: 'BatteryMonitor', tooltip: tooltipText(), items: [...rows, toggle, ...ACTION_ITEMS] };
+  return { icon: iconFor(deviceList(), cfg.lowThreshold, darkTheme), title: 'BatteryMonitor', tooltip: tooltipText(), items: [...rows, toggle, ...ACTION_ITEMS] };
 }
 function initTray() {
   if (process.argv.includes('--no-tray')) return;
@@ -305,11 +317,13 @@ function promoteTrayIcon() {
 let lastIconKey = '';
 function updateTray() {
   if (!systray) return;
+  refreshTheme();
   const key = JSON.stringify([
     deviceList().map((d) => [d.key, d.battery, d.charging, d.full, d.linked, d.ok, d.kind]),
     tooltipText(),
     cfg.lowThreshold,
     autoStartOn,
+    darkTheme,
   ]);
   if (key === lastIconKey) return;
   lastIconKey = key;
@@ -388,7 +402,13 @@ server.listen(cfg.port, '127.0.0.1', () => {
   log(`状态页: http://127.0.0.1:${cfg.port}  (轮询 ${cfg.pollMs / 1000}s, 低电量阈值 ${cfg.lowThreshold}%)`);
   refreshAutoStart(); // 先读自启状态(含旧启动项迁移), 菜单首建时勾选态才正确
   initTray();
-  pill.init({ getData: deviceList, getLow: () => cfg.lowThreshold, url: `http://127.0.0.1:${cfg.port}` });
+  hovercard.init({
+    getData: deviceList,
+    getLow: () => cfg.lowThreshold,
+    getTheme: () => darkTheme,
+    url: `http://127.0.0.1:${cfg.port}`,
+    log,
+  });
   poll('boot').then(() => {
     if (cfg.autoOpen || process.argv.includes('--open')) openBrowser();
     schedulePoll();

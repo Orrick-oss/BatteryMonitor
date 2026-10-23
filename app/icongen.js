@@ -70,8 +70,9 @@ const DIGITS = {
   '-': ['000', '000', '111', '000', '000'],
 };
 
-// 贴片图标: chips = [{ battery, charging, online, kind }] (最多取 2 个)
-function drawRGBA({ chips = [], low = 20 } = {}) {
+// 贴片图标: chips = [{ battery, charging, online, kind }]
+// mode='worst': 只画电量最低设备的大号数字(无底、无图形), 托盘 16~24px 下最清晰
+function drawRGBA({ chips = [], low = 20, mode = 'pair', dark = false } = {}) {
   const S = 64;
   const px = Buffer.alloc(S * S * 4);
   const set = (x, y, c) => {
@@ -103,42 +104,63 @@ function drawRGBA({ chips = [], low = 20 } = {}) {
     }
   };
   const textW = (text, cell) => text.length * 4 * cell - cell;
-  // 设备图形(深灰轮廓)
-  const drawGlyph = (kind, cx, cy) => {
+  // 设备图形(深灰轮廓), sc 缩放 + 加粗线宽(32px 托盘尺寸下更醒目)
+  const drawGlyph = (kind, cx, cy, sc = 1) => {
+    const t = Math.max(1, Math.round(sc * 1.3)); // 线宽
+    const box = (w, h) => {
+      const x0 = Math.round(cx - w / 2), y0 = Math.round(cy - h / 2);
+      return { x0, y0, x1: x0 + w - 1, y1: y0 + h - 1, cx, cy };
+    };
+    const frame = (b) => {
+      rect(b.x0, b.y0, b.x1, b.y0 + t - 1, GLYPH);
+      rect(b.x0, b.y1 - t + 1, b.x1, b.y1, GLYPH);
+      rect(b.x0, b.y0, b.x0 + t - 1, b.y1, GLYPH);
+      rect(b.x1 - t + 1, b.y0, b.x1, b.y1, GLYPH);
+    };
     if (kind === 'mouse') {
-      // 胶囊轮廓 + 分界线
-      const w = 9, h = 15, x0 = Math.round(cx - w / 2), y0 = Math.round(cy - h / 2), x1 = x0 + w - 1, y1 = y0 + h - 1;
-      for (let x = x0 + 1; x <= x1 - 1; x++) { set(x, y0, GLYPH); set(x, y1, GLYPH); }
-      for (let y = y0 + 1; y <= y1 - 1; y++) { set(x0, y, GLYPH); set(x1, y, GLYPH); }
-      set(x0, y0 + 1, GLYPH); set(x1, y0 + 1, GLYPH); set(x0, y1 - 1, GLYPH); set(x1, y1 - 1, GLYPH);
-      for (let y = y0 + 2; y <= y0 + 5; y++) set(Math.round(cx), y, GLYPH);
+      const b = box(Math.round(9 * sc), Math.round(15 * sc));
+      frame(b);
+      const my = Math.round(b.cy);
+      for (let y = b.y0 + Math.round(2 * sc); y <= b.y0 + Math.round(5 * sc); y++) rect(my, y, my + t - 1, y, GLYPH);
     } else if (kind === 'keyboard') {
-      // 外框 + 键点行 + 空格条
-      const w = 17, h = 11, x0 = Math.round(cx - w / 2), y0 = Math.round(cy - h / 2), x1 = x0 + w - 1, y1 = y0 + h - 1;
-      for (let x = x0; x <= x1; x++) { set(x, y0, GLYPH); set(x, y1, GLYPH); }
-      for (let y = y0; y <= y1; y++) { set(x0, y, GLYPH); set(x1, y, GLYPH); }
-      for (let x = x0 + 2; x <= x1 - 2; x += 3) set(x, y0 + 3, GLYPH);
-      rect(x0 + 3, y1 - 3, x1 - 3, y1 - 3, GLYPH);
+      const b = box(Math.round(17 * sc), Math.round(11 * sc));
+      frame(b);
+      const ky = b.y0 + Math.round(4 * sc);
+      for (let x = b.x0 + t + 1; x <= b.x1 - t - 1; x += Math.max(2, Math.round(2.5 * sc))) {
+        rect(x, ky, Math.min(x + t - 1, b.x1 - t), ky + t - 1, GLYPH);
+      }
+      rect(b.x0 + Math.round(3.5 * sc), b.y1 - t - Math.round(sc), b.x1 - Math.round(3.5 * sc), b.y1 - t, GLYPH);
     } else {
-      // 其他类型: 电池轮廓 + 凸头
-      const w = 16, h = 10, x0 = Math.round(cx - w / 2), y0 = Math.round(cy - h / 2), x1 = x0 + w - 1, y1 = y0 + h - 1;
-      for (let x = x0; x <= x1; x++) { set(x, y0, GLYPH); set(x, y1, GLYPH); }
-      for (let y = y0; y <= y1; y++) { set(x0, y, GLYPH); set(x1, y, GLYPH); }
-      rect(x1 + 1, y0 + 3, x1 + 2, y1 - 3, GLYPH);
+      const b = box(Math.round(16 * sc), Math.round(10 * sc));
+      frame(b);
+      rect(b.x1 + 1, b.y0 + Math.round(3 * sc), b.x1 + t, b.y1 - Math.round(3 * sc), GLYPH);
     }
   };
-  const stateColor = (d) => !d.online ? T_OFFLINE
-    : d.charging ? T_CHARGING
-      : (Number.isFinite(d.battery) && d.battery <= low) ? T_LOW : T_GOOD;
+  const stateColor = (d) => !d.online ? (dark ? hex('#98989F') : T_OFFLINE)
+    : d.charging ? (dark ? hex('#4DA3FF') : T_CHARGING)
+      : (Number.isFinite(d.battery) && d.battery <= low) ? (dark ? hex('#FF453A') : T_LOW)
+        : (dark ? hex('#34D058') : T_GOOD);
 
-  // ---- 贴片底 ----
-  rrect(1, 1, S - 2, S - 2, 14, PILL_BG);
   const list = chips.slice(0, 2);
   const cy = 32;
 
+  // ---- 纯数字模式(托盘图标): 无底色无图形, 数字占满图标 ----
+  if (mode === 'worst') {
+    const d = list[0] || { online: false };
+    const num = d.online && Number.isFinite(d.battery) ? String(Math.round(d.battery)) : '-';
+    let cell = 7;
+    while (cell > 3 && textW(num, cell) > S - 4) cell--;
+    const tw = textW(num, cell);
+    drawText(num, cell, Math.round((S - tw) / 2), cy, stateColor(d));
+    return { S, px };
+  }
+
+  // ---- 贴片底 ----
+  rrect(1, 1, S - 2, S - 2, 14, PILL_BG);
+
   if (list.length === 0) {
     drawText('-', 4, 22, cy, T_OFFLINE);
-  } else   if (list.length === 1) {
+  } else if (list.length === 1) {
     // 单设备: [图形] NN%
     const d = list[0];
     const num = d.online && Number.isFinite(d.battery) ? String(Math.round(d.battery)) + '%' : '-';
@@ -171,10 +193,7 @@ function drawIcon(params) {
 
 // ---------- ICO 编码（经典 32bpp BMP 格式，Windows 托盘必需） ----------
 // 结构: ICONDIR(6B) + ICONDIRENTRY(16B) + BITMAPINFOHEADER(40B) + XOR(BGRA 倒序) + AND 掩码(1bpp 倒序)
-function encodeICO(width, height, rgba) {
-  const dir = Buffer.alloc(6);
-  dir.writeUInt16LE(0, 0); dir.writeUInt16LE(1, 2); dir.writeUInt16LE(1, 4); // type=1 图标, 1 张图
-
+function bmpBlob(width, height, rgba) {
   const stride = width * 4;
   const xor = Buffer.alloc(stride * height);
   const maskStride = Math.ceil(width / 32) * 4; // AND 掩码行按 32bit 对齐
@@ -200,15 +219,32 @@ function encodeICO(width, height, rgba) {
   bih.writeUInt16LE(32, 14); // bitCount
   bih.writeUInt32LE(0, 16);  // BI_RGB
   bih.writeUInt32LE(xor.length + and.length, 20); // sizeImage
+  return Buffer.concat([bih, xor, and]);
+}
 
-  const entry = Buffer.alloc(16); // ICONDIRENTRY
-  entry[0] = width % 256; entry[1] = height % 256;
-  entry.writeUInt16LE(1, 4);  // planes
-  entry.writeUInt16LE(32, 6); // bitCount
-  entry.writeUInt32LE(40 + xor.length + and.length, 8); // bytesInRes
-  entry.writeUInt32LE(22, 12); // 偏移 = 6 + 16
+// 多尺寸 ICO: entries = [{ size, rgba }] — Windows 按显示尺寸挑选最合适的一张
+function encodeMultiICO(entries) {
+  const count = entries.length;
+  const dir = Buffer.alloc(6 + count * 16);
+  dir.writeUInt16LE(0, 0); dir.writeUInt16LE(1, 2); dir.writeUInt16LE(count, 4);
+  let offset = 6 + count * 16;
+  const blobs = [];
+  entries.forEach((e, i) => {
+    const blob = bmpBlob(e.size, e.size, e.rgba);
+    const base = 6 + i * 16;
+    dir[base] = e.size % 256; dir[base + 1] = e.size % 256; // 0 表示 256
+    dir.writeUInt16LE(1, base + 4);  // planes
+    dir.writeUInt16LE(32, base + 6); // bitCount
+    dir.writeUInt32LE(blob.length, base + 8); // bytesInRes
+    dir.writeUInt32LE(offset, base + 12);     // 偏移
+    offset += blob.length;
+    blobs.push(blob);
+  });
+  return Buffer.concat([dir, ...blobs]);
+}
 
-  return Buffer.concat([dir, entry, bih, xor, and]);
+function encodeICO(width, height, rgba) {
+  return encodeMultiICO([{ size: width, rgba }]);
 }
 
 // alpha 感知的盒式降采样（64 → 32 等）
@@ -232,23 +268,28 @@ function downsample(rgba, w, factor) {
 }
 
 // 状态 → 图标缓存（Windows 托盘要求 ICO 格式，见 systray2 README）
-// devices: [{ battery, charging, linked, ok, kind }] — 贴片最多显示 2 个设备
+// devices: [{ battery, charging, linked, ok, kind }]
+// 主图规则: 只画电量最低的那台在线设备(醒目提示最需要充电的); 无在线设备则显示首台(离线色)
 const cache = new Map();
-function iconFor(devices, low = 20) {
-  const list = Array.isArray(devices) ? devices : [devices];
-  const chips = list
-    .filter((d) => d && d.present !== false)
-    .map((d) => ({
-      battery: d.battery, charging: !!d.charging,
-      online: !!d.ok && !!d.linked, kind: d.kind || null,
-    }))
-    .sort((a, b) => kindOrder(a.kind) - kindOrder(b.kind))
-    .slice(0, 2);
-  const key = JSON.stringify([chips, low]);
+function iconFor(devices, low = 20, dark = false) {
+  const list = (Array.isArray(devices) ? devices : [devices]).filter((d) => d && d.present !== false);
+  const online = list
+    .filter((d) => d.ok && d.linked && Number.isFinite(d.battery))
+    .sort((a, b) => a.battery - b.battery);
+  const pick = online[0] || list[0] || null;
+  const chips = pick
+    ? [{ battery: pick.battery, charging: !!pick.charging, online: !!pick.ok && !!pick.linked, kind: pick.kind || null }]
+    : [];
+  const key = JSON.stringify([chips, low, dark, 'worst']);
   if (!cache.has(key)) {
-    const { S, px } = drawRGBA({ chips, low });
-    // 托盘用 32x32（64 降采样更锐利），ICO 格式
-    cache.set(key, encodeICO(S / 2, S / 2, downsample(px, S, 2)).toString('base64'));
+    const { S, px } = drawRGBA({ chips, low, mode: 'worst', dark });
+    // 16px + 32px 双尺寸: 托盘实际按 16~24px 显示, 给 16px 单独采样才不糊
+    const ico = encodeMultiICO([
+      { size: 16, rgba: downsample(px, S, 4) },
+      { size: 32, rgba: downsample(px, S, 2) },
+    ]);
+    cache.set(key, ico.toString('base64'));
+    if (cache.size > 200) cache.delete(cache.keys().next().value); // 防无限增长
   }
   return cache.get(key);
 }
@@ -260,7 +301,7 @@ function fullSizeICO(state) {
   return encodeICO(S, S, px);
 }
 
-module.exports = { iconFor, fullSizeICO, encodePNG, encodeICO, drawRGBA, downsample };
+module.exports = { iconFor, fullSizeICO, encodePNG, encodeICO, encodeMultiICO, drawRGBA, downsample };
 
 // CLI 预览: node icongen.js → 生成 sample-*.png / sample-*.ico
 if (require.main === module) {
