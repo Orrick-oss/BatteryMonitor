@@ -1,0 +1,14 @@
+# 依赖与构建产物
+node_modules/
+*.zip
+
+# 个人运行数据(含校准配置/历史记录/日志)
+app/data/
+app/config.json
+
+# 第三方参考源码(版权归属各自作者, 不随本项目分发)
+references/
+
+# 系统文件
+Thumbs.db
+Desktop.ini

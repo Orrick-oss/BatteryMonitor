@@ -1,0 +1,61 @@
+# BatteryMonitor
+
+Windows 外设电量常驻监视器 —— 纯 Node.js 实现，支持多品牌无线外设的实时电量查询、托盘常驻、低电量提醒与历史曲线。
+
+当前实测支持的设备：
+
+| 设备 | 连接 | 状态 | 协议方案 |
+|---|---|---|---|
+| MCHOSE 迈从 A7 Pro（鼠标） | 2.4G | ✅ 已真机验证 | Realtek 方案，feature 0x11 + 取反编码 |
+| AULA 狼蛛 F87（键盘） | 2.4G | ✅ 已真机验证 | Compx 方案，report 0x13 推送帧 |
+| ATK X1 V2（鼠标） | 2.4G | 代码就绪，待真机验证 | Beken 引擎，report 0x08 + 校验和 |
+
+## 功能
+
+- **多设备并行查询**：每台设备独立协议引擎，插上自动识别，拔掉自动消失
+- **托盘常驻**：电池图标实时显示电量与状态（颜色跟随自定义阈值），图标角标区分鼠标/键盘
+- **右键菜单**：实时读数、开机自启开关、打开状态页、立即刷新
+- **本地状态页**（`http://127.0.0.1:8787`）：每设备独立卡片、电量环、按真实时间轴的历史曲线
+- **低电量提醒**：阈值 1~99 自由设置，低于阈值弹 Windows 通知
+- **自适应轮询**：设备齐全时 60s 慢轮询，有设备离线时 12s 快速探测，上线即识别
+- **每设备校准**：读数与设备显示有偏差时可在页面单独微调
+- **极低占用**：无 Electron，Node 单进程 + Rust 微型托盘（实测空闲 CPU < 0.2%，内存 ~60MB）
+
+## 使用
+
+```bash
+cd app
+npm install          # node-hid + systray2
+node daemon.js       # 启动服务 + 托盘
+node launch.js       # 或: 已在运行则只打开状态页
+```
+
+开机自启：托盘右键 →「开机自启：已开启」。
+
+## 设备探测工具
+
+协议适配/排查用的真机工具：
+
+```bash
+node probe.js        # 枚举本机全部 HID 设备
+node atktest.js      # ATK Beken 协议真机探测
+node aulatest.js     # AULA/Compx 协议真机探测
+```
+
+## 协议实现说明
+
+- **MCHOSE（Realtek）**：VID 0x5253（备选 0x3837），usagePage 0xFF01/0xFF0B，SetFeature `[0x11][cmd^0xFF][0xFF填充]`（21 字节），身份命令 0x06，响应含 VID/电量/充电标志；首次写入为热身，需重试。
+- **AULA（Compx）**：VID 0x3554 & PID 0xFA09（与 F99 Pro 接收器同方案），厂商接口 usagePage 0xFF02/0x0002，20 字节帧，校验和 = 前 19 字节之和；写会话帧 `13 05 01` 后读推送 `13 0A`：`[6]=电量%`，`[7] bit0x10=充电中`。注意 3554 为 Compx 共用号段，判据必须带 usagePage+usage。
+- **ATK（Beken）**：VID 0x373B & PID 0x12E9（X1 V2 8K），Report ID 0x08、cmd 0x04，校验 `(0x55 - Σ(rid+data)) & 0xFF`；响应 `[6]=电量 [7]=充电 [8..9]=mV 大端`（offset 自适应 rid 前缀）。
+
+协议细节参考了以下开源项目（仅本地对照研究，未随仓库分发）：
+
+- [FerrisPulse 灵脉](https://github.com/lasoadavhd/FerrisPulse)（Beken/ATK 协议）
+- [vigil-watt](https://github.com/evren-oct/vigil-watt)（AULA/迈从插件协议）
+- [offline-mchose](https://github.com/Offlinedd/offline-mchose)（迈从 legacy 协议文档）
+
+## 已知限制
+
+- F87 休眠时接收器读不到电量，页面显示「休眠」，按任意键唤醒即恢复
+- 键盘固件电量为分档粗报（90~100% 都可能报 100）
+- ATK X1 V2 适配代码单测通过，真机验证 pending（到手后跑 `node atktest.js`）

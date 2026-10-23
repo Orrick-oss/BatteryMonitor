@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>外设电量监视</title>
+<style>
+  :root {
+    --bg: #f3f5f9; --card: #ffffff; --text: #1f2937; --sub: #6b7280;
+    --green: #22c55e; --amber: #f59e0b; --red: #ef4444; --blue: #3b82f6;
+    --track: #e5e7eb; --shadow: 0 10px 30px rgba(31,41,55,.08);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f172a; --card: #1e293b; --text: #e2e8f0; --sub: #94a3b8; --track: #334155; --shadow: 0 10px 30px rgba(0,0,0,.4); }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; padding: 28px 24px; }
+  .wrap { max-width: 1120px; margin: 0 auto; }
+  h1 { font-size: 15px; font-weight: 600; color: var(--sub); letter-spacing: .12em; }
+  .updated { font-size: 12px; color: var(--sub); margin: 4px 0 20px; }
+  .cards { display: flex; flex-wrap: wrap; gap: 20px; }
+  .card { background: var(--card); border-radius: 24px; box-shadow: var(--shadow); padding: 24px 26px; flex: 1 1 430px; min-width: 400px; max-width: 540px; }
+  .chead { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .chead .ico { font-size: 24px; line-height: 1; }
+  .chead .nm { font-size: 16px; font-weight: 700; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip { display: inline-flex; align-items: center; gap: 7px; background: var(--track); border-radius: 999px; padding: 5px 12px; font-size: 12px; flex: none; }
+  .chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+  .chip.off .dot { background: var(--red); }
+  .main { display: flex; align-items: center; gap: 26px; }
+  .ring { position: relative; width: 148px; height: 148px; flex: none; }
+  .ring svg { transform: rotate(-90deg); }
+  .ring .val { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .ring .val b { font-size: 36px; font-weight: 700; line-height: 1; transition: color .3s; }
+  .ring .val span { font-size: 11px; color: var(--sub); margin-top: 4px; }
+  .charging .val b { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .55; } }
+  .info { flex: 1; display: flex; flex-direction: column; gap: 9px; font-size: 12.5px; }
+  .kv { display: flex; justify-content: space-between; color: var(--sub); gap: 8px; }
+  .kv b { color: var(--text); font-weight: 600; text-align: right; }
+  .banner { margin-top: 12px; background: #fef2f2; color: var(--red); border-radius: 12px; padding: 10px 14px; font-size: 13px; display: none; }
+  @media (prefers-color-scheme: dark) { .banner { background: #450a0a; } }
+  .chart { margin-top: 14px; }
+  .chart h2 { font-size: 11px; color: var(--sub); font-weight: 600; letter-spacing: .08em; margin-bottom: 4px; display: flex; justify-content: space-between; }
+  .chart h2 span { font-weight: 400; }
+  .chart svg { display: block; width: 100%; height: 96px; }
+  .axis { font-size: 10px; fill: var(--sub); font-family: "Segoe UI", sans-serif; }
+  .grid { stroke: var(--track); stroke-width: 1; }
+  .lowrow { display: flex; align-items: center; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--track); font-size: 12px; color: var(--sub); }
+  .lowrow input { width: 58px; padding: 4px 8px; border: 1px solid var(--track); border-radius: 8px; background: var(--card); color: var(--text); font-size: 12px; }
+  .lowrow button { padding: 5px 12px; border: none; border-radius: 8px; background: var(--blue); color: #fff; font-size: 12px; cursor: pointer; }
+  .settings { margin-top: 20px; background: var(--card); border-radius: 20px; box-shadow: var(--shadow); padding: 16px 22px; display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--sub); flex-wrap: wrap; }
+  .settings input { width: 64px; padding: 4px 8px; border: 1px solid var(--track); border-radius: 8px; background: var(--card); color: var(--text); font-size: 12px; }
+  .settings button { padding: 5px 14px; border: none; border-radius: 8px; background: var(--blue); color: #fff; font-size: 12px; cursor: pointer; }
+  .settings .tip { margin-left: auto; font-size: 11.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>外设电量监视</h1>
+  <div class="updated" id="updated"></div>
+  <div class="cards" id="cards"></div>
+  <div class="settings">
+    低电量提醒阈值 <input id="lowInput" type="number" step="1"> %
+    <button id="saveLowBtn">保存</button>
+    <span class="tip">每分钟自动刷新 · 数据仅保存在本机</span>
+  </div>
+</div>
+<script>
+const C = { green:'#22c55e', amber:'#f59e0b', red:'#ef4444', blue:'#3b82f6' };
+const KIND_ICON = { mouse:'🖱️', keyboard:'⌨️', headset:'🎧' };
+const $ = (id) => document.getElementById(id);
+const R = 62, LEN = 2 * Math.PI * R;
+let historyData = [];
+let lastDevs = [];
+
+function colorFor(b, charging, low){ return charging ? C.blue : b <= low ? C.red : C.green; }
+function fmtTime(t){ if(!t) return '—'; const d = new Date(t); return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2,'0')).join(':'); }
+function fmtAxis(t, spanMs){
+  const d = new Date(t);
+  const hm = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+  return spanMs > 24 * 3600e3 ? (d.getMonth()+1) + '-' + d.getDate() + ' ' + hm : hm;
+}
+
+function cardHTML(x){
+  const k = x.key;
+  return `
+  <div class="chead">
+    <span class="ico">${KIND_ICON[x.kind] || '🔌'}</span>
+    <span class="nm">${x.device || k}</span>
+    <span class="chip" id="chip-${k}"><span class="dot"></span><span id="chipt-${k}">…</span></span>
+  </div>
+  <div class="main">
+    <div class="ring" id="ring-${k}">
+      <svg width="148" height="148">
+        <circle cx="74" cy="74" r="${R}" fill="none" stroke="var(--track)" stroke-width="12"/>
+        <circle id="arc-${k}" cx="74" cy="74" r="${R}" fill="none" stroke="var(--green)" stroke-width="12"
+                stroke-linecap="round" stroke-dasharray="${LEN.toFixed(1)}" stroke-dashoffset="0"
+                style="transition: stroke-dashoffset .8s ease, stroke .3s;"/>
+      </svg>
+      <div class="val"><b id="pct-${k}">--</b><span id="mode-${k}">连接中…</span></div>
+    </div>
+    <div class="info">
+      <div class="kv"><span>设备类型</span><b id="kind-${k}">—</b></div>
+      <div class="kv"><span>连接方式</span><b id="mode2-${k}">—</b></div>
+      <div class="kv"><span>状态</span><b id="st-${k}">—</b></div>
+      <div class="kv"><span>电池电压</span><b id="mv-${k}">—</b></div>
+      <div class="kv"><span>最近读数</span><b id="lastOk-${k}">—</b></div>
+    </div>
+  </div>
+  <div class="banner" id="bn-${k}"></div>
+  <div class="chart">
+    <h2>电量走势 <span id="range-${k}"></span></h2>
+    <svg id="spark-${k}" viewBox="0 0 480 96" preserveAspectRatio="none"></svg>
+  </div>
+  <div class="lowrow">
+    校准偏移 <input id="off-${k}" type="number" min="-20" max="20" step="1">
+    <button data-off="${k}">保存</button>
+  </div>`;
+}
+
+function setInput(el, v){ if (el && document.activeElement !== el) el.value = v; } // 输入中不覆盖用户键入
+
+function fillCard(x, data){
+  const k = x.key;
+  const ok = x.ok && x.battery !== null;
+  const ring = $('ring-' + k), arc = $('arc-' + k), pct = $('pct-' + k);
+  const chip = $('chip-' + k), chipt = $('chipt-' + k);
+  $('kind-' + k).textContent = x.kind === 'mouse' ? '鼠标' : x.kind === 'keyboard' ? '键盘' : '外设';
+  $('mode2-' + k).textContent = x.mode || '—';
+  $('mv-' + k).parentElement.style.display = ok && x.millivolts ? 'flex' : 'none'; // 无电压数据则整行隐藏
+  $('lastOk-' + k).textContent = fmtTime(x.lastOk);
+  if (ok){
+    const b = x.battery, low = data.lowThreshold ?? 20;
+    pct.textContent = b + '%';
+    pct.style.color = colorFor(b, x.charging, low);
+    arc.setAttribute('stroke-dashoffset', (LEN * (1 - b / 100)).toFixed(1));
+    arc.setAttribute('stroke', colorFor(b, x.charging, low));
+    ring.classList.toggle('charging', !!x.charging);
+    $('mode-' + k).textContent = x.charging ? '充电中' : (x.mode || '在线');
+    chip.className = 'chip';
+    chipt.textContent = x.charging ? '充电中' : (x.linked ? '在线' : '休眠');
+    $('st-' + k).textContent = x.charging ? '正在充电' : (x.linked ? '正常放电' : '休眠（按任意键唤醒）');
+    $('bn-' + k).style.display = 'none';
+  } else {
+    pct.textContent = '--';
+    pct.style.color = '';
+    arc.setAttribute('stroke-dashoffset', LEN);
+    arc.setAttribute('stroke', 'var(--track)');
+    ring.classList.remove('charging');
+    $('mode-' + k).textContent = '无读数';
+    chip.className = 'chip off';
+    chipt.textContent = '离线';
+    $('st-' + k).textContent = '—';
+    const bn = $('bn-' + k);
+    bn.style.display = 'block';
+    bn.textContent = x.error || '尚未获取到读数';
+  }
+  const curOff = (data.offsets && Number.isFinite(data.offsets[k])) ? data.offsets[k] : (k === 'mchose' ? (data.offset ?? 0) : 0);
+  setInput($('off-' + k), curOff);
+}
+
+// 时间轴走势图: x 按记录真实时刻, y 为电量; 网格线 0/50/100 + 首/中/末时刻刻度
+function chartFor(k){
+  const el = $('spark-' + k), range = $('range-' + k);
+  if (!el) return;
+  const pts = historyData.filter(p => p && p.ok === 1 && typeof p.b === 'number' && (p.d ? p.d === k : k === 'mchose')).slice(-360);
+  const w = 480, h = 96, padL = 26, padR = 8, padT = 6, padB = 16;
+  if (pts.length < 2){
+    el.innerHTML = `<text class="axis" x="${w/2}" y="${h/2}" text-anchor="middle">记录积累中…（每 10 分钟落一个点）</text>`;
+    range.textContent = '';
+    return;
+  }
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t, span = (t1 - t0) || 1;
+  const X = (t) => padL + (t - t0) / span * (w - padL - padR);
+  const Y = (b) => padT + (1 - b / 100) * (h - padT - padB);
+  let s = '';
+  for (const g of [100, 50, 0]){
+    s += `<line class="grid" x1="${padL}" x2="${w - padR}" y1="${Y(g)}" y2="${Y(g)}"/>`;
+    s += `<text class="axis" x="2" y="${(Y(g) + 3).toFixed(1)}">${g}</text>`;
+  }
+  const a0 = fmtAxis(t0, span), am = fmtAxis((t0 + t1) / 2, span), a1 = fmtAxis(t1, span);
+  s += `<text class="axis" x="${padL}" y="${h - 3}">${a0}</text>`;
+  s += `<text class="axis" x="${w / 2}" y="${h - 3}" text-anchor="middle">${am}</text>`;
+  s += `<text class="axis" x="${w - padR}" y="${h - 3}" text-anchor="end">${a1}</text>`;
+  const poly = pts.map(p => X(p.t).toFixed(1) + ',' + Y(p.b).toFixed(1)).join(' ');
+  s += `<polyline fill="none" stroke="${C.blue}" stroke-width="2" stroke-linejoin="round" points="${poly}"/>`;
+  const last = pts[pts.length - 1];
+  s += `<circle cx="${X(t1).toFixed(1)}" cy="${Y(last.b).toFixed(1)}" r="3" fill="${C.blue}"/>`;
+  el.innerHTML = s;
+  range.textContent = a0 + ' ~ ' + a1;
+}
+
+function render(data){
+  const devs = (data.devices || []).filter(x => x.present !== false);
+  lastDevs = devs;
+  const cards = $('cards');
+  for (const el of [...cards.children]){
+    if (!devs.some(x => x.key === el.dataset.key)) el.remove();
+  }
+  for (const x of devs){
+    if (!cards.querySelector(`[data-key="${x.key}"]`)){
+      const div = document.createElement('div');
+      div.className = 'card';
+      div.dataset.key = x.key;
+      div.innerHTML = cardHTML(x);
+      cards.appendChild(div);
+    }
+  }
+  for (const x of devs) fillCard(x, data);
+  setInput($('lowInput'), data.lowThreshold ?? 20);
+  $('updated').textContent = '更新于 ' + fmtTime(Date.now()) + (data.lastTry ? ' · 下次轮询约 ' + fmtTime(data.lastTry + 60000) : '');
+  for (const x of devs) chartFor(x.key);
+}
+
+function renderHistory(){
+  for (const x of lastDevs) chartFor(x.key);
+}
+
+async function refresh(){
+  try { render(await (await fetch('/api/battery')).json()); }
+  catch(e){
+    $('updated').textContent = '无法连接本地服务，重试中…';
+  }
+}
+async function refreshHistory(){
+  try { historyData = await (await fetch('/api/history')).json(); renderHistory(); } catch(e){}
+}
+
+$('cards').addEventListener('click', async (e) => {
+  const b = e.target.closest('button[data-off]');
+  if (!b) return;
+  const k = b.dataset.off;
+  await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: k, offset: Number($('off-' + k).value) || 0 }) });
+  refresh();
+});
+$('saveLowBtn').addEventListener('click', async () => {
+  await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lowThreshold: Number($('lowInput').value) || 20 }) });
+  refresh();
+});
+
+refresh(); refreshHistory();
+setInterval(refresh, 5000);
+setInterval(refreshHistory, 60000);
+</script>
+</body>
+</html>
