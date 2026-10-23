@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>安装 BatteryMonitor</title>
+<link rel="icon" href="/icon.ico">
+<style>
+  :root {
+    --bg: #f3f5f9; --card: #fff; --text: #1f2937; --sub: #6b7280; --line: #e5e7eb;
+    --accent: #2563eb; --accent-soft: #eff6ff; --green: #22c55e; --red: #ef4444;
+    --shadow: 0 24px 60px rgba(31,41,55,.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0b1220; --card: #151f31; --text: #e6ecf5; --sub: #96a3b8; --line: #26344a;
+      --accent: #60a5fa; --accent-soft: #16283f; --shadow: 0 24px 60px rgba(0,0,0,.5); }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text);
+    min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 40px 20px; }
+  .win { width: 640px; max-width: 100%; background: var(--card); border-radius: 22px; box-shadow: var(--shadow); overflow: hidden; }
+  .head { display: flex; align-items: center; gap: 14px; padding: 24px 28px 20px; border-bottom: 1px solid var(--line); }
+  .logo { width: 46px; height: 46px; border-radius: 13px; background: linear-gradient(160deg, #3b82f6, #1d4ed8);
+    display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; font-weight: 700; letter-spacing: .02em; flex: none; }
+  .head .t1 { font-size: 17px; font-weight: 700; }
+  .head .t2 { font-size: 12px; color: var(--sub); margin-top: 3px; }
+  .body { padding: 22px 28px 8px; }
+  .step { display: none; }
+  .step.on { display: block; animation: fade .22s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } }
+  h2 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+  p.desc { font-size: 12.5px; color: var(--sub); line-height: 1.7; }
+  .pathrow { display: flex; gap: 8px; margin: 16px 0 6px; }
+  .pathrow input { flex: 1; padding: 10px 12px; font-size: 12.5px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--bg); color: var(--text); font-family: inherit; }
+  .pathrow input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .hint { font-size: 11.5px; color: var(--sub); }
+  .opts { margin: 18px 0 4px; display: flex; flex-direction: column; gap: 10px; }
+  label.opt { display: flex; align-items: flex-start; gap: 10px; font-size: 12.5px; cursor: pointer; line-height: 1.5; }
+  label.opt input { margin-top: 2px; width: 15px; height: 15px; accent-color: var(--accent); flex: none; }
+  label.opt span small { display: block; color: var(--sub); font-size: 11.5px; margin-top: 2px; }
+  .tree { margin: 16px 0 6px; background: var(--bg); border-radius: 12px; padding: 12px 14px; font-size: 11.5px;
+    color: var(--sub); font-family: Consolas, "Courier New", monospace; line-height: 1.9; }
+  .tree b { color: var(--text); font-weight: 600; }
+  .bar { height: 6px; border-radius: 99px; background: var(--line); overflow: hidden; margin: 22px 0 10px; }
+  .bar i { display: block; height: 100%; width: 0; border-radius: 99px; background: var(--accent); transition: width .3s ease; }
+  .pmsg { font-size: 12.5px; color: var(--sub); display: flex; justify-content: space-between; }
+  .done .big { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .tick { width: 34px; height: 34px; border-radius: 50%; background: #16a34a; color: #fff; display: flex;
+    align-items: center; justify-content: center; font-size: 18px; flex: none; }
+  .foot { display: flex; align-items: center; gap: 10px; padding: 18px 28px 22px; }
+  .foot .spacer { flex: 1; }
+  button { font-family: inherit; font-size: 13px; padding: 9px 20px; border-radius: 10px; border: 1px solid transparent;
+    cursor: pointer; transition: .15s; }
+  button.primary { background: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.08); }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  button.ghost { background: transparent; color: var(--sub); border-color: var(--line); }
+  button.ghost:hover { color: var(--text); }
+  .err { margin-top: 14px; padding: 10px 12px; border-radius: 10px; background: #fef2f2; color: var(--red); font-size: 12px; display: none; }
+  @media (prefers-color-scheme: dark) { .err { background: #3f1414; } }
+</style>
+</head>
+<body>
+<div class="win">
+  <div class="head">
+    <div class="logo">BM</div>
+    <div>
+      <div class="t1">BatteryMonitor 安装程序</div>
+      <div class="t2" id="subtitle">外设电量监视 · 版本 —</div>
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="step on" id="s1">
+      <h2>选择安装位置</h2>
+      <p class="desc">程序将安装到下面的文件夹，安装后可在开始菜单和「设置 → 应用」中找到它。</p>
+      <div class="pathrow">
+        <input id="dirInput" spellcheck="false">
+        <button class="ghost" id="browseBtn" title="使用默认位置">默认</button>
+      </div>
+      <div class="hint" id="dirHint"></div>
+
+      <div class="tree">
+        <b>BatteryMonitor\</b><br>
+        &nbsp;&nbsp;BatteryMonitor.exe&nbsp;&nbsp;&nbsp;<span>主程序</span><br>
+        &nbsp;&nbsp;Uninstall.exe&nbsp;&nbsp;&nbsp;<span>卸载程序</span><br>
+        &nbsp;&nbsp;app\<span>&nbsp;&nbsp;程序本体（状态页、协议引擎、依赖）</span>
+      </div>
+
+      <div class="opts">
+        <label class="opt"><input type="checkbox" id="optDesktop" checked><span>创建桌面快捷方式</span></label>
+        <label class="opt"><input type="checkbox" id="optAutoStart" checked>
+          <span>开机自动启动<span><small>登录后静默运行，不弹窗口，只出现托盘图标</small></span></span></label>
+        <label class="opt"><input type="checkbox" id="optLaunch" checked><span>安装完成后立即运行</span></label>
+      </div>
+      <div class="err" id="errBox"></div>
+    </div>
+
+    <div class="step" id="s2">
+      <h2>正在安装</h2>
+      <p class="desc">正在把程序文件写入磁盘，请稍候。</p>
+      <div class="bar"><i id="barFill"></i></div>
+      <div class="pmsg"><span id="pMsg">准备中…</span><span id="pPct">0%</span></div>
+    </div>
+
+    <div class="step" id="s3">
+      <div class="done">
+        <div class="tick">✓</div>
+        <div>
+          <h2 id="doneTitle">安装完成</h2>
+          <p class="desc" id="doneDesc">程序已在后台运行，托盘区会出现电量图标。</p>
+        </div>
+      </div>
+      <div class="tree" id="donePath"></div>
+      <p class="desc">卸载方式：开始菜单 → BatteryMonitor → 卸载 BatteryMonitor，或「设置 → 应用 → 已安装的应用」。</p>
+    </div>
+  </div>
+
+  <div class="foot">
+    <span class="hint" id="footHint">安装可在任意时刻取消，不会留下残留文件。</span>
+    <span class="spacer"></span>
+    <button class="ghost" id="cancelBtn">取消</button>
+    <button class="primary" id="nextBtn">安装</button>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let info = null, pollTimer = null, installed = false;
+
+  const setStep = (n) => {
+    for (const k of ['s1', 's2', 's3']) $(k).classList.toggle('on', k === 's' + n);
+    $('cancelBtn').style.display = n === 3 ? 'none' : '';
+    $('nextBtn').style.display = n === 2 ? 'none' : '';
+  };
+
+  function showErr(msg) {
+    $('errBox').style.display = msg ? 'block' : 'none';
+    $('errBox').textContent = msg || '';
+  }
+
+  async function load() {
+    const r = await fetch('/api/state').then((x) => x.json());
+    info = r;
+    $('subtitle').textContent = `外设电量监视 · 版本 ${r.version}` + (r.installed ? ` · 已安装 ${r.installedVersion || ''}` : '');
+    $('dirInput').value = r.installed && r.dir ? r.dir : r.defaultDir;
+    $('nextBtn').textContent = r.installed ? '重新安装' : '安装';
+    $('dirHint').textContent = r.installed
+      ? '检测到已安装的版本，继续将覆盖安装并保留配置与电量历史。'
+      : (r.legacy ? '检测到旧版本数据，安装时会自动迁移配置与电量历史。' : '建议使用默认位置；也可安装到其他磁盘。');
+  }
+
+  $('browseBtn').onclick = () => { $('dirInput').value = info.defaultDir; };
+
+  $('cancelBtn').onclick = async () => {
+    await fetch('/api/close', { method: 'POST' });
+    window.close();
+    document.body.innerHTML = '<p style="font-family:Segoe UI,sans-serif;color:#888">已取消，可关闭此页面。</p>';
+  };
+
+  $('nextBtn').onclick = async () => {
+    if (installed) {
+      await fetch('/api/close', { method: 'POST' }).catch(() => {});
+      document.body.innerHTML = '<p style="font-family:Segoe UI,sans-serif;color:#888">安装完成，可关闭此页面。</p>';
+      return;
+    }
+    const dir = $('dirInput').value.trim();
+    if (!dir) return showErr('请填写安装位置');
+    showErr('');
+    setStep(2);
+    const res = await fetch('/api/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        dir,
+        desktop: $('optDesktop').checked,
+        autoStart: $('optAutoStart').checked,
+        launchAfter: $('optLaunch').checked,
+      }),
+    }).then((x) => x.json()).catch(() => ({ ok: false, error: '无法连接安装服务' }));
+    if (!res.ok) { setStep(1); return showErr(res.error || '安装启动失败'); }
+    poll();
+  };
+
+  function poll() {
+    clearInterval(pollTimer);
+    pollTimer = setInterval(async () => {
+      let p;
+      try { p = await fetch('/api/progress').then((x) => x.json()); } catch { return; }
+      const pct = Math.max(0, Math.min(100, p.pct || 0));
+      $('barFill').style.width = pct + '%';
+      $('pPct').textContent = pct + '%';
+      if (p.msg) $('pMsg').textContent = p.msg;
+      if (p.error) {
+        clearInterval(pollTimer);
+        setStep(1);
+        $('nextBtn').textContent = '重试';
+        showErr('安装失败：' + p.error);
+      } else if (p.done) {
+        clearInterval(pollTimer);
+        installed = true;
+        $('donePath').innerHTML = '<b>' + p.result.dir + '</b><br>&nbsp;&nbsp;BatteryMonitor.exe&nbsp;&nbsp;&nbsp;主程序<br>&nbsp;&nbsp;Uninstall.exe&nbsp;&nbsp;&nbsp;卸载程序<br>&nbsp;&nbsp;app\\<span>&nbsp;&nbsp;程序本体</span>';
+        $('doneDesc').textContent = $('optLaunch').checked
+          ? '程序已在后台运行，托盘区会出现电量图标。'
+          : '从开始菜单或桌面快捷方式启动即可。';
+        $('footHint').textContent = '';
+        $('nextBtn').textContent = '完成';
+        setStep(3);
+      }
+    }, 350);
+  }
+
+  load();
+</script>
+</body>
+</html>

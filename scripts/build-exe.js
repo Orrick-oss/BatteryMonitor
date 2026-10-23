@@ -1,6 +1,8 @@
-// 构建单文件 exe: 内嵌 app 载荷 + Node 运行时 (Node SEA)
+// 构建发行版可执行文件: 内嵌 app 载荷 + Node 运行时 (Node SEA)
 // 用法: node scripts/build-exe.js [版本号]
-// 产物: dist/BatteryMonitor.exe  (双击即用, 无需安装运行时)
+// 产物: dist/BatteryMonitor.exe               主程序（安装目录内运行的那一个）
+//       dist/BatteryMonitor-Setup-<ver>.exe   安装包（双击进入安装向导）
+// 同一份二进制按「文件名 / 运行位置」自动切换角色，见 scripts/bootstrap.js
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
@@ -128,10 +130,15 @@ const bootstrapOut = path.join(BUILD, 'bootstrap.out.js');
 fs.writeFileSync(bootstrapOut, bootstrap);
 
 const seaConfig = path.join(BUILD, 'sea-config.json');
+const UI = path.join(__dirname, 'ui');
 fs.writeFileSync(seaConfig, JSON.stringify({
   main: bootstrapOut,
   output: path.join(BUILD, 'sea-prep.blob'),
-  assets: { 'payload.bin': path.join(BUILD, 'payload.bin') },
+  assets: {
+    'payload.bin': path.join(BUILD, 'payload.bin'),
+    'setup.html': path.join(UI, 'setup.html'),
+    'uninstall.html': path.join(UI, 'uninstall.html'),
+  },
   disableExperimentalSEAWarning: true,
 }, null, 2));
 
@@ -183,9 +190,12 @@ if (sub.readUInt16LE(0) === 3) {
 fs.closeSync(fd);
 
 // ---------- 6. 汇总 ----------
+const setupOut = path.join(DIST, `BatteryMonitor-Setup-${VER}.exe`);
+fs.copyFileSync(OUT, setupOut);
 const finalSize = fs.statSync(OUT).size;
-console.log(`[6/6] 完成: ${OUT}`);
-console.log(`      体积 ${(finalSize / 1048576).toFixed(1)}MB`);
+console.log(`[6/6] 完成`);
+console.log(`      安装包 ${setupOut}  ${(finalSize / 1048576).toFixed(1)}MB`);
+console.log(`      主程序 ${OUT}`);
 fs.rmSync(STAGE, { recursive: true, force: true });
 fs.rmSync(path.join(BUILD, 'sea-prep.blob'), { force: true });
 fs.rmSync(path.join(BUILD, 'payload.bin'), { force: true });

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>卸载 BatteryMonitor</title>
+<link rel="icon" href="/icon.ico">
+<style>
+  :root {
+    --bg: #f3f5f9; --card: #fff; --text: #1f2937; --sub: #6b7280; --line: #e5e7eb;
+    --accent: #dc2626; --accent-soft: #fef2f2; --shadow: 0 24px 60px rgba(31,41,55,.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0b1220; --card: #151f31; --text: #e6ecf5; --sub: #96a3b8; --line: #26344a;
+      --accent: #f87171; --accent-soft: #38201f; --shadow: 0 24px 60px rgba(0,0,0,.5); }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text);
+    min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 40px 20px; }
+  .win { width: 600px; max-width: 100%; background: var(--card); border-radius: 22px; box-shadow: var(--shadow); overflow: hidden; }
+  .head { display: flex; align-items: center; gap: 14px; padding: 24px 28px 20px; border-bottom: 1px solid var(--line); }
+  .logo { width: 46px; height: 46px; border-radius: 13px; background: linear-gradient(160deg, #64748b, #334155);
+    display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; font-weight: 700; flex: none; }
+  .head .t1 { font-size: 17px; font-weight: 700; }
+  .head .t2 { font-size: 12px; color: var(--sub); margin-top: 3px; }
+  .body { padding: 22px 28px 6px; }
+  .step { display: none; }
+  .step.on { display: block; animation: fade .22s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } }
+  h2 { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
+  p.desc { font-size: 12.5px; color: var(--sub); line-height: 1.75; }
+  .kv { margin: 16px 0 14px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  .kv div { display: flex; gap: 12px; padding: 9px 14px; font-size: 12.5px; }
+  .kv div + div { border-top: 1px solid var(--line); }
+  .kv span { color: var(--sub); width: 76px; flex: none; }
+  .kv b { font-weight: 500; word-break: break-all; }
+  label.opt { display: flex; align-items: flex-start; gap: 10px; font-size: 12.5px; cursor: pointer; line-height: 1.5; margin: 6px 0 2px; }
+  label.opt input { margin-top: 2px; width: 15px; height: 15px; accent-color: #2563eb; flex: none; }
+  label.opt small { display: block; color: var(--sub); font-size: 11.5px; margin-top: 2px; }
+  .bar { height: 6px; border-radius: 99px; background: var(--line); overflow: hidden; margin: 22px 0 10px; }
+  .bar i { display: block; height: 100%; width: 0; border-radius: 99px; background: var(--accent); transition: width .3s ease; }
+  .pmsg { font-size: 12.5px; color: var(--sub); display: flex; justify-content: space-between; }
+  .big { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .tick { width: 34px; height: 34px; border-radius: 50%; background: #16a34a; color: #fff; display: flex;
+    align-items: center; justify-content: center; font-size: 18px; flex: none; }
+  .foot { display: flex; align-items: center; gap: 10px; padding: 18px 28px 22px; }
+  .foot .spacer { flex: 1; }
+  button { font-family: inherit; font-size: 13px; padding: 9px 20px; border-radius: 10px; border: 1px solid transparent; cursor: pointer; transition: .15s; }
+  button.danger { background: var(--accent); color: #fff; }
+  button.danger:hover { filter: brightness(1.08); }
+  button.ghost { background: transparent; color: var(--sub); border-color: var(--line); }
+  button.ghost:hover { color: var(--text); }
+  .err { margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); font-size: 12px; display: none; }
+</style>
+</head>
+<body>
+<div class="win">
+  <div class="head">
+    <div class="logo">BM</div>
+    <div>
+      <div class="t1">卸载 BatteryMonitor</div>
+      <div class="t2" id="subtitle">外设电量监视</div>
+    </div>
+  </div>
+
+  <div class="body">
+    <div class="step on" id="s1">
+      <h2>即将从这台电脑上移除</h2>
+      <div class="kv">
+        <div><span>安装位置</span><b id="kDir">—</b></div>
+        <div><span>版本</span><b id="kVer">—</b></div>
+        <div><span>占用空间</span><b id="kSize">—</b></div>
+      </div>
+      <p class="desc">卸载会停止正在运行的程序，删除程序文件、开始菜单与桌面快捷方式，并从「设置 → 应用」中移除条目。</p>
+      <label class="opt" style="margin-top:14px"><input type="checkbox" id="keepData">
+        <span>保留电量历史与设置<small>仅留下 app\data 与 config.json，重新安装后曲线不丢</small></span></label>
+      <div class="err" id="errBox"></div>
+    </div>
+
+    <div class="step" id="s2">
+      <h2>正在卸载</h2>
+      <p class="desc">请稍候，卸载完成后会自动清理剩余文件。</p>
+      <div class="bar"><i id="barFill"></i></div>
+      <div class="pmsg"><span id="pMsg">准备中…</span><span id="pPct">0%</span></div>
+    </div>
+
+    <div class="step" id="s3">
+      <div class="big">
+        <div class="tick">✓</div>
+        <div>
+          <h2 id="doneTitle">已卸载</h2>
+          <p class="desc" id="doneDesc">程序文件已删除，可在几秒后关闭此页面。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <span class="spacer"></span>
+    <button class="ghost" id="cancelBtn">取消</button>
+    <button class="danger" id="goBtn">卸载</button>
+  </div>
+</div>
+
+<script>
+  const $ = (id) => document.getElementById(id);
+  let done = false, timer = null;
+  const setStep = (n) => {
+    for (const k of ['s1', 's2', 's3']) $(k).classList.toggle('on', k === 's' + n);
+    $('cancelBtn').style.display = n === 1 ? '' : 'none';
+    $('goBtn').style.display = n === 1 ? '' : 'none';
+  };
+  const showErr = (m) => { $('errBox').style.display = m ? 'block' : 'none'; $('errBox').textContent = m || ''; };
+
+  async function load() {
+    const r = await fetch('/api/state').then((x) => x.json());
+    $('kDir').textContent = r.dir || '—';
+    $('kVer').textContent = r.installedVersion || r.version;
+    $('kSize').textContent = r.sizeMB ? r.sizeMB + ' MB' : '—';
+    $('subtitle').textContent = '外设电量监视 · 版本 ' + ($('kVer').textContent);
+    if (!r.installed) {
+      $('goBtn').disabled = true;
+      showErr('没有找到安装信息，可能已被手动删除。可直接关闭此页面并删除该文件夹。');
+    }
+  }
+
+  $('cancelBtn').onclick = async () => {
+    await fetch('/api/close', { method: 'POST' }).catch(() => {});
+    document.body.innerHTML = '<p style="font-family:Segoe UI,sans-serif;color:#888">已取消卸载，可关闭此页面。</p>';
+  };
+
+  $('goBtn').onclick = async () => {
+    setStep(2);
+    const res = await fetch('/api/uninstall', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keepData: $('keepData').checked }),
+    }).then((x) => x.json()).catch(() => ({ ok: false, error: '无法连接卸载服务' }));
+    if (!res.ok) { setStep(1); return showErr(res.error || '卸载启动失败'); }
+    timer = setInterval(async () => {
+      let p;
+      try { p = await fetch('/api/progress').then((x) => x.json()); } catch { return; }
+      const pct = Math.max(0, Math.min(100, p.pct || 0));
+      $('barFill').style.width = pct + '%';
+      $('pPct').textContent = pct + '%';
+      if (p.msg) $('pMsg').textContent = p.msg;
+      if (p.error) {
+        clearInterval(timer);
+        setStep(1);
+        showErr('卸载失败：' + p.error);
+      } else if (p.done) {
+        clearInterval(timer);
+        done = true;
+        $('doneDesc').textContent = p.result && p.result.keepData
+          ? '程序已移除，电量历史与设置保留在原目录的 app\\data 中。'
+          : '程序文件已删除，可在几秒后关闭此页面。';
+        setStep(3);
+        await fetch('/api/close', { method: 'POST' }).catch(() => {});
+      }
+    }, 350);
+  };
+
+  load();
+</script>
+</body>
+</html>

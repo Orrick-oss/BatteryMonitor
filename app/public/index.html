@@ -51,7 +51,16 @@
   .settings { margin-top: 20px; background: var(--card); border-radius: 20px; box-shadow: var(--shadow); padding: 16px 22px; display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--sub); flex-wrap: wrap; }
   .settings input { width: 64px; padding: 4px 8px; border: 1px solid var(--track); border-radius: 8px; background: var(--card); color: var(--text); font-size: 12px; }
   .settings button { padding: 5px 14px; border: none; border-radius: 8px; background: var(--blue); color: #fff; font-size: 12px; cursor: pointer; }
+  .settings button.ghost { background: transparent; color: var(--blue); border: 1px solid var(--blue); }
+  .probe { margin-top: 14px; }
+  .probe-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .probe-head button { padding: 4px 10px; border: none; border-radius: 7px; background: var(--blue); color: #fff; font-size: 12px; cursor: pointer; }
+  .probe pre { margin: 0; padding: 12px; border-radius: 10px; background: rgba(120,120,128,.12); font-size: 11.5px; line-height: 1.5; max-height: 340px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
   .settings .tip { margin-left: auto; font-size: 11.5px; }
+  .foot { margin: 20px 0 4px; display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 11.5px; color: var(--sub); flex-wrap: wrap; }
+  .foot .sep { opacity: .45; }
+  .foot a { color: var(--sub); text-decoration: none; border-bottom: 1px dashed var(--track); cursor: pointer; }
+  .foot a:hover { color: var(--text); }
 </style>
 </head>
 <body>
@@ -62,7 +71,23 @@
   <div class="settings">
     低电量提醒阈值 <input id="lowInput" type="number" step="1"> %
     <button id="saveLowBtn">保存</button>
+    <button id="atkProbeBtn" class="ghost">ATK 诊断</button>
     <span class="tip">每分钟自动刷新 · 数据仅保存在本机</span>
+  </div>
+  <div class="probe" id="probeWrap" style="display:none">
+    <div class="probe-head">
+      <b>ATK 协议诊断</b>
+      <span class="tip">把下面的内容整段发给我即可定位</span>
+      <button id="probeClose">收起</button>
+    </div>
+    <pre id="probeOut">诊断中…</pre>
+  </div>
+  <div class="foot">
+    <span id="footVer">BatteryMonitor</span>
+    <span class="sep">·</span>
+    <span id="footDir">—</span>
+    <span class="sep">·</span>
+    <a id="openDirBtn">打开程序目录</a>
   </div>
 </div>
 <script>
@@ -240,9 +265,57 @@ $('saveLowBtn').addEventListener('click', async () => {
   refresh();
 });
 
+$('atkProbeBtn').addEventListener('click', async () => {
+  const wrap = $('probeWrap'), out = $('probeOut');
+  wrap.style.display = 'block';
+  out.textContent = '诊断中…（会依次试 2 种协议 × 所有候选接口，约 5~15 秒）';
+  try {
+    const r = await (await fetch('/api/atk-probe')).json();
+    out.textContent = r.ok ? fmtProbe(r) : ('诊断失败: ' + (r.error || '未知错误'));
+  } catch (e) {
+    out.textContent = '请求失败: ' + e.message;
+  }
+});
+$('probeClose').addEventListener('click', () => { $('probeWrap').style.display = 'none'; });
+
+function fmtProbe(r){
+  const L = [];
+  L.push('结论: ' + (r.verdict || '-'));
+  L.push('探测 VID: ' + (r.vids || []).join(' / '));
+  L.push('');
+  L.push('【HID 设备】' + (r.devices && r.devices.length ? r.devices.length + ' 个' : ' 无'));
+  for (const d of r.devices || []) {
+    L.push('  ' + d.vid + ':' + d.pid + '  usagePage=' + d.usagePage + ' usage=' + d.usage + '  ' +
+      (d.product || '(无名)') + (d.manufacturer ? ' / ' + d.manufacturer : '') + (d.skipped ? '  [已跳过]' : ''));
+  }
+  L.push('');
+  L.push('【逐接口尝试】');
+  for (const a of r.attempts || []) {
+    L.push('  · ' + a.variant + '  usagePage=' + (a.usagePage && ('0x' + a.usagePage.toString(16).toUpperCase())));
+    if (a.openError) L.push('      打开失败: ' + a.openError);
+    if (a.writeError) L.push('      写失败: ' + a.writeError);
+    if (a.wrote != null) L.push('      写入: ' + a.wrote + ' 字节' + (a.writeLen ? '（报文长度 ' + a.writeLen + 'B）' : ''));
+    if (a.readError) L.push('      读失败: ' + a.readError);
+    if (a.frames && a.frames.length) { for (const f of a.frames) L.push('      收到: ' + f); }
+    else L.push('      收到: (无回帧)');
+    if (a.hit) L.push('      ✔ 命中: ' + a.hit + ' (第 ' + a.attempt + ' 次尝试)');
+  }
+  return L.join('\n');
+}
+
 refresh(); refreshHistory();
 setInterval(refresh, 5000);
 setInterval(refreshHistory, 60000);
+
+// 页脚: 版本与安装位置(有 appinfo 接口才显示)
+(async () => {
+  try {
+    const a = await (await fetch('/api/appinfo')).json();
+    if (a && a.version) $('footVer').textContent = 'BatteryMonitor ' + a.version;
+    if (a && a.installDir) $('footDir').textContent = '安装于 ' + a.installDir;
+    $('openDirBtn').onclick = () => fetch('/api/open-folder', { method: 'POST' }).catch(() => {});
+  } catch { }
+})();
 </script>
 </body>
 </html>

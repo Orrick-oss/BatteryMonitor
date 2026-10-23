@@ -7,7 +7,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { queryAll } = require('./battery');
+const { queryAll, probeAtk } = require('./battery');
 const { iconFor } = require('./icongen');
 const hovercard = require('./hovercard');
 
@@ -117,7 +117,7 @@ function notify(title, msg) {
       '$n = New-Object System.Windows.Forms.NotifyIcon; ' +
       '$n.Icon = [System.Drawing.SystemIcons]::Warning; $n.Visible = $true; ' +
       `$n.ShowBalloonTip(8000, '${title}', '${msg}', [System.Windows.Forms.ToolTipIcon]::Warning); ` +
-      'Start-Sleep -Seconds 9; $n.Dispose()'], { detached: true, stdio: 'ignore' }).unref();
+      'Start-Sleep -Seconds 9; $n.Dispose()'], { stdio: 'ignore', windowsHide: true }).unref();
   } catch { /* 提醒失败不影响主流程 */ }
 }
 
@@ -181,57 +181,72 @@ function schedulePoll() {
   pollTimer = setTimeout(async () => { await poll('auto'); schedulePoll(); }, missing ? 12000 : cfg.pollMs);
 }
 
-// ---------- 开机自启（启动文件夹 .vbs，托盘菜单可切换） ----------
+// ---------- 开机自启（HKCU Run 键，托盘菜单可切换） ----------
+// 早先用「启动文件夹 + .vbs」实现，但部分安全软件会拦截向 Startup 写脚本（实测 EPERM），
+// 改为写入 Run 键（主流做法，无需脚本、无黑框）。
 const os = require('os');
-const STARTUP_DIR = path.join(
+const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+const RUN_VALUE = 'BatteryMonitor';
+const LEGACY_STARTUP_DIR = path.join(
   process.env.APPDATA || path.join(os.userInfo().homedir, 'AppData', 'Roaming'),
   'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
-const STARTUP_VBS = path.join(STARTUP_DIR, 'BatteryMonitor.vbs');
-const OLD_STARTUP_VBS = path.join(STARTUP_DIR, 'A7 Pro 电量监视.vbs');
-// 单文件 exe 版(bootstrap 注入的 BM_VERSION)直接指向 exe; 源码版指向 launch.js
+const LEGACY_VBS = [
+  path.join(LEGACY_STARTUP_DIR, 'BatteryMonitor.vbs'),
+  path.join(LEGACY_STARTUP_DIR, 'A7 Pro 电量监视.vbs'),
+];
+// 安装版(bootstrap 注入 BM_VERSION)直接指向主程序; 源码版指向 launch.js
 const IS_SEA = !!process.env.BM_VERSION || !/node\.exe$/i.test(process.execPath);
-function startupVbsContent() {
-  const target = IS_SEA
+function startupCommand() {
+  return IS_SEA
     ? `"${process.execPath}" --no-open`
     : `"${process.execPath}" "${path.join(ROOT, 'launch.js')}" --no-open`;
-  return `' BatteryMonitor 开机自启（由托盘右键菜单管理，请勿手动改名/移动）\n` +
-    `' 隐藏启动: 服务已在运行则忽略, 不弹浏览器\n` +
-    `CreateObject("WScript.Shell").Run "${target}", 0, False\n`;
+}
+function reg(args) {
+  try {
+    return require('child_process').execFileSync('reg', args, { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+  } catch { return ''; }
+}
+function readAutoStart() {
+  const m = reg(['query', RUN_KEY, '/v', RUN_VALUE]).match(/REG_SZ\s+(.+)/);
+  return m ? m[1].trim() : '';
 }
 let autoStartOn = false;
 function refreshAutoStart() {
-  try {
-    // 迁移: 旧名字启动项并入新名字（保留开启状态）
-    if (fs.existsSync(OLD_STARTUP_VBS)) {
-      if (!fs.existsSync(STARTUP_VBS)) fs.writeFileSync(STARTUP_VBS, startupVbsContent());
-      fs.unlinkSync(OLD_STARTUP_VBS);
-      log('[自启] 已把旧启动项迁移为 BatteryMonitor.vbs');
-    }
-  } catch (e) { log('[自启] 迁移失败: ' + e.message); }
-  // 自愈: 自启脚本内容过期(如换成单文件 exe 版后路径变了)则按当前形态重写, 保留开启状态
-  try {
-    if (fs.existsSync(STARTUP_VBS) && fs.readFileSync(STARTUP_VBS, 'utf8') !== startupVbsContent()) {
-      fs.writeFileSync(STARTUP_VBS, startupVbsContent());
-      log('[自启] 已更新自启脚本路径');
-    }
-  } catch { }
-  autoStartOn = fs.existsSync(STARTUP_VBS);
+  for (const v of LEGACY_VBS) {
+    try {
+      if (fs.existsSync(v)) { fs.unlinkSync(v); log('[自启] 已移除旧启动脚本 ' + path.basename(v)); }
+    } catch { }
+  }
+  const cur = readAutoStart();
+  const want = startupCommand();
+  if (cur && cur !== want) {   // 程序被移动/换版本后自愈
+    reg(['add', RUN_KEY, '/v', RUN_VALUE, '/t', 'REG_SZ', '/d', want, '/f']);
+    log('[自启] 已更新启动命令');
+  }
+  autoStartOn = !!readAutoStart();
 }
 function setStartup(on) {
-  try {
-    if (on) fs.writeFileSync(STARTUP_VBS, startupVbsContent());
-    else fs.unlinkSync(STARTUP_VBS);
-    log('[自启] ' + (on ? '已开启' : '已关闭') + ' (' + STARTUP_VBS + ')');
-  } catch (e) { log('[自启] 设置失败: ' + e.message); }
-  autoStartOn = fs.existsSync(STARTUP_VBS);
+  if (on) reg(['add', RUN_KEY, '/v', RUN_VALUE, '/t', 'REG_SZ', '/d', startupCommand(), '/f']);
+  else reg(['delete', RUN_KEY, '/v', RUN_VALUE, '/f']);
+  autoStartOn = !!readAutoStart();
+  log('[自启] ' + (on ? '已开启' : '已关闭') + ' (' + RUN_KEY + '\\' + RUN_VALUE + ')');
 }
 
 // ---------- 托盘 ----------
 let systray = null;
 const KIND_LABEL = { mouse: '鼠标', keyboard: '键盘', headset: '耳机' };
+// 安装目录(展示"打开程序目录"、卸载入口用); 源码运行时退化为 app 目录的上级
+const INSTALL_DIR = process.env.BM_EXE_DIR || (IS_SEA ? path.dirname(process.execPath) : path.dirname(ROOT));
+const APP_VERSION = process.env.BM_VERSION || (() => {
+  try { return require('./package.json').version; } catch { return ''; }
+})();
+function openFolder(dir) {
+  try { spawn('explorer', [dir], { detached: true, stdio: 'ignore' }).unref(); } catch { }
+}
 const ACTION_ITEMS = [
   { title: '打开状态页', tooltip: '在浏览器打开电量页' },
   { title: '立即刷新', tooltip: '马上查询一次电量' },
+  { title: '打开程序目录', tooltip: INSTALL_DIR },
   { title: '退出', tooltip: '退出 BatteryMonitor' },
 ];
 // 任务栏明暗主题(托盘图标数字配色 + 悬浮卡片配色都跟随)
@@ -273,6 +288,7 @@ function initTray() {
       const t = action.item && action.item.title;
       if (t === '打开状态页') openBrowser();
       else if (t === '立即刷新') poll('manual');
+      else if (t === '打开程序目录') openFolder(INSTALL_DIR);
       else if (t === '开机自启' || (t && t.startsWith('开机自启：'))) {
         const on = !autoStartOn;
         setStartup(on);
@@ -406,6 +422,31 @@ const server = http.createServer((req, res) => {
     });
   }
   if (url === '/api/history') return json(res, history);
+  if (url === '/api/appinfo') {
+    return json(res, {
+      app: 'BatteryMonitor', version: APP_VERSION, installDir: INSTALL_DIR,
+      appDir: ROOT, autoStart: autoStartOn, platform: process.platform, pid: process.pid,
+    });
+  }
+  if (url === '/api/open-folder' && req.method === 'POST') {
+    openFolder(INSTALL_DIR);
+    return json(res, { ok: true, dir: INSTALL_DIR });
+  }
+  if (url === '/api/quit' && req.method === 'POST') {    // 安装/卸载程序通过它让常驻服务优雅退出(先回包再退, 避免连接被重置)
+    json(res, { ok: true });
+    setTimeout(() => { try { systray && systray.kill(true); } catch { } process.exit(0); }, 150);
+    return;
+  }
+  if (url === '/api/atk-probe') {
+    // ATK 协议诊断: 逐个接口 × 协议变体试帧, 返回原始收发帧(排查"在线但无应答")
+    if (state.atkProbing) return json(res, { ok: false, error: '诊断进行中，请稍候' });
+    state.atkProbing = true;
+    probeAtk()
+      .then((r) => json(res, { ok: true, ...r }))
+      .catch((e) => json(res, { ok: false, error: e.message }))
+      .finally(() => { state.atkProbing = false; });
+    return;
+  }
   if (url === '/api/config' && req.method === 'POST') {
     let body = '';
     req.on('data', (c) => { body += c; if (body.length > 4096) req.destroy(); });
