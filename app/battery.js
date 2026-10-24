@@ -236,7 +236,9 @@ async function queryAula() {
 const ATK_VID = 0x373B;         // ATK
 const ATK_VXE_VID = 0x3554;     // VXE / VGN 同方案(需排除狼蛛 F87 的 PID FA09)
 const ATK_NAMES = {
-  0x12e9: 'ATK X1 V2', 0x1088: 'ATK X1 Pro', 0x1089: 'ATK X1 Pro Max',
+  0x12e9: 'ATK X1 V2', 0x11d9: 'ATK X1 V2',   // 0x11d9 = X1 V2 8K 接收器 "Wireless mouse 8k dongle-L"
+  0x105c: 'ATK X1 V2 (有线)',                  // MAD68 = X1 V2 本体有线模式
+  0x1088: 'ATK X1 Pro', 0x1089: 'ATK X1 Pro Max',
   0x1086: 'ATK F1 Pro Max', 0x1087: 'ATK F1 Ultimate 8K', 0x1279: 'ATK A9 AIR 8K',
   0x10c9: 'ATK Nearlink (A9/烈空)', 0x1085: 'VXE R1 SE/SE+', 0x1216: 'ATK/VXE 2.4G NANO 接收器',
 };

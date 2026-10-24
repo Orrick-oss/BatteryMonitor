@@ -62,10 +62,19 @@ copyDir(path.join(APP, 'public'), path.join(STAGE, 'public'));
 
 // 依赖(剔除其它平台的预编译二进制, 只留 win32-x64)
 copyDir(path.join(APP, 'node_modules'), path.join(STAGE, 'node_modules'), (name) => name === '.bin');
-const PREBUILDS = path.join(STAGE, 'node_modules', 'node-hid', 'prebuilds');
-if (fs.existsSync(PREBUILDS)) {
-  for (const d of fs.readdirSync(PREBUILDS)) {
-    if (d !== 'HID-win32-x64') fs.rmSync(path.join(PREBUILDS, d), { recursive: true, force: true });
+function prunePrebuilds(base, keepRe) {
+  if (!fs.existsSync(base)) return;
+  for (const d of fs.readdirSync(base)) {
+    if (!keepRe.test(d)) fs.rmSync(path.join(base, d), { recursive: true, force: true });
+  }
+}
+prunePrebuilds(path.join(STAGE, 'node_modules', 'node-hid', 'prebuilds'), /^HID-win32-x64$/);
+prunePrebuilds(path.join(STAGE, 'node_modules', 'koffi', 'prebuilds'), /^win32_x64$/);
+// systray2 只留 Windows 托盘程序(darwin/linux 各 ~4MB)
+const TRAYBIN = path.join(STAGE, 'node_modules', 'systray2', 'traybin');
+if (fs.existsSync(TRAYBIN)) {
+  for (const d of fs.readdirSync(TRAYBIN)) {
+    if (!/^tray_windows/i.test(d)) fs.rmSync(path.join(TRAYBIN, d), { force: true });
   }
 }
 // 文档类文件不进包
@@ -188,6 +197,16 @@ if (sub.readUInt16LE(0) === 3) {
   console.log('      子系统已是 ' + sub.readUInt16LE(0) + ' (跳过)');
 }
 fs.closeSync(fd);
+
+// 5d. UPX 压缩运行时: 93MB → ~28MB。必须在 resedit/postject/子系统补丁全部之后
+// (UPX 会重写 PE 节布局, 压缩后无法再注入)。postject 注入的节点与资源实测兼容。
+const UPX = process.env.UPX_EXE || 'D:/Tools/upx/upx-5.0.2-win64/upx.exe';
+if (fs.existsSync(UPX)) {
+  console.log('      UPX 压缩…');
+  sh(UPX, ['--best', '--lzma', '--force', OUT]);
+} else {
+  console.log('      未找到 UPX, 跳过压缩 (体积较大)');
+}
 
 // ---------- 6. 汇总 ----------
 const setupOut = path.join(DIST, `BatteryMonitor-Setup-${VER}.exe`);
