@@ -52,37 +52,6 @@
   .settings input { width: 64px; padding: 4px 8px; border: 1px solid var(--track); border-radius: 8px; background: var(--card); color: var(--text); font-size: 12px; }
   .settings button { padding: 5px 14px; border: none; border-radius: 8px; background: var(--blue); color: #fff; font-size: 12px; cursor: pointer; }
   .settings button.ghost { background: transparent; color: var(--blue); border: 1px solid var(--blue); }
-  .probe { margin-top: 14px; }
-  .probe-head { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-  .probe-head button { padding: 4px 10px; border: none; border-radius: 7px; background: var(--blue); color: #fff; font-size: 12px; cursor: pointer; }
-  .probe-card { background: var(--card); border-radius: 16px; box-shadow: var(--shadow); padding: 16px 18px; max-height: 420px; overflow: auto; }
-  .pv { display: flex; align-items: center; gap: 12px; padding: 4px 2px 12px; border-bottom: 1px solid var(--track); }
-  .pv .ico { width: 38px; height: 38px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 19px; flex: none; }
-  .pv.ok .ico { background: rgba(34,197,94,.14); }
-  .pv.warn .ico { background: rgba(245,158,11,.14); }
-  .pv .tt { flex: 1; min-width: 0; }
-  .pv .tt b { font-size: 14px; display: block; }
-  .pv .tt span { font-size: 11.5px; color: var(--sub); }
-  .pv .bat { font-size: 26px; font-weight: 700; color: var(--green); flex: none; }
-  .pa { display: flex; gap: 10px; padding: 10px 2px; border-bottom: 1px solid var(--track); font-size: 12px; align-items: flex-start; }
-  .pa:last-child { border-bottom: none; }
-  .pa .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; margin-top: 5px; }
-  .pa.hit .dot { background: var(--green); }
-  .pa.err .dot { background: var(--red); }
-  .pa.mute .dot { background: var(--track); }
-  .pa .body { flex: 1; min-width: 0; }
-  .pa .body .t { font-weight: 600; }
-  .pa .body .t em { font-style: normal; color: var(--sub); font-weight: 400; margin-left: 8px; font-size: 11px; }
-  .pa .body .d { color: var(--sub); font-size: 11.5px; margin-top: 2px; word-break: break-all; }
-  .pa .body .d code { font-family: Consolas, monospace; font-size: 10.5px; background: rgba(120,120,128,.12); border-radius: 5px; padding: 1px 5px; }
-  .pa .tag { flex: none; font-size: 10.5px; padding: 2px 8px; border-radius: 999px; margin-top: 2px; }
-  .pa.hit .tag { background: rgba(34,197,94,.15); color: var(--green); font-weight: 700; }
-  .pa.err .tag { background: rgba(239,68,68,.12); color: var(--red); }
-  .pa.mute .tag { background: var(--track); color: var(--sub); }
-  .pd { margin-top: 10px; font-size: 11.5px; color: var(--sub); }
-  .pd summary { cursor: pointer; user-select: none; }
-  .pd .devs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-  .pd .devs span { font-family: Consolas, monospace; font-size: 10.5px; background: rgba(120,120,128,.12); border-radius: 999px; padding: 3px 9px; }
   .settings .tip { margin-left: auto; font-size: 11.5px; }
   .foot { margin: 20px 0 4px; display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 11.5px; color: var(--sub); flex-wrap: wrap; }
   .foot .sep { opacity: .45; }
@@ -98,16 +67,7 @@
   <div class="settings">
     低电量提醒阈值 <input id="lowInput" type="number" step="1"> %
     <button id="saveLowBtn">保存</button>
-    <button id="atkProbeBtn" class="ghost">ATK 诊断</button>
     <span class="tip">每分钟自动刷新 · 数据仅保存在本机</span>
-  </div>
-  <div class="probe" id="probeWrap" style="display:none">
-    <div class="probe-head">
-      <b>ATK 协议诊断</b>
-      <span class="tip">把下面的内容整段发给我即可定位</span>
-      <button id="probeClose">收起</button>
-    </div>
-    <div class="probe-card" id="probeOut">诊断中…</div>
   </div>
   <div class="foot">
     <span id="footVer">BatteryMonitor</span>
@@ -291,54 +251,6 @@ $('saveLowBtn').addEventListener('click', async () => {
     body: JSON.stringify({ lowThreshold: Number($('lowInput').value) || 20 }) });
   refresh();
 });
-
-$('atkProbeBtn').addEventListener('click', async () => {
-  const wrap = $('probeWrap'), out = $('probeOut');
-  wrap.style.display = 'block';
-  out.textContent = '诊断中…（会依次试 2 种协议 × 所有候选接口，约 5~15 秒）';
-  try {
-    const r = await (await fetch('/api/atk-probe')).json();
-    out.innerHTML = r.ok ? fmtProbe(r) : ('<div class="pv warn"><div class="ico">⚠️</div><div class="tt"><b>诊断失败</b><span>' + esc(r.error || '未知错误') + '</span></div></div>');
-  } catch (e) {
-    out.textContent = '请求失败: ' + e.message;
-  }
-});
-$('probeClose').addEventListener('click', () => { $('probeWrap').style.display = 'none'; });
-
-function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-function fmtProbe(r){
-  const hit = r.result;
-  const ok = !!hit;
-  let h = '<div class="pv ' + (ok ? 'ok' : 'warn') + '">'
-    + '<div class="ico">' + (ok ? '✔' : '⚠️') + '</div>'
-    + '<div class="tt"><b>' + esc(ok ? ('协议命中 · ' + hit.variant) : (r.verdict || '诊断完成')) + '</b>'
-    + '<span>探测 VID: ' + (r.vids || []).join(' / ') + (r.truncated ? ' ·（超时截断）' : '') + '</span></div>'
-    + (ok ? '<div class="bat">' + hit.battery + '%</div>' : '')
-    + '</div>';
-  for (const a of r.attempts || []) {
-    const cls = a.hit ? 'hit' : (a.writeError || a.openError || a.readError) ? 'err' : 'mute';
-    const tag = a.hit ? '命中' : a.openError ? '打不开' : a.writeError ? '写失败' : a.readError ? '读失败' : (a.frames && a.frames.length) ? '无匹配' : '无回帧';
-    const up = a.usagePage ? '0x' + a.usagePage.toString(16).toUpperCase() : '';
-    let d = '';
-    if (a.wrote != null) d += '写入 ' + a.wrote + ' 字节' + (a.writeLen ? '（报文 ' + a.writeLen + 'B）' : '') + ' · ';
-    if (a.writeError) d += esc(a.writeError) + ' · ';
-    if (a.readError) d += '读失败 ' + esc(a.readError) + ' · ';
-    if (a.frames && a.frames.length) d += a.frames.slice(0, 4).map(f => '<code>' + esc(f) + '</code>').join(' ');
-    else if (!a.writeError && !a.readError) d += '未收到回帧（鼠标可能休眠）';
-    h += '<div class="pa ' + cls + '"><div class="dot"></div><div class="body">'
-      + '<div class="t">' + esc(a.variant) + (up ? '<em>usagePage ' + up + '</em>' : '') + '</div>'
-      + (d ? '<div class="d">' + d.replace(/ · $/, '') + '</div>' : '')
-      + '</div><div class="tag">' + tag + '</div></div>';
-  }
-  const devs = (r.devices || []);
-  if (devs.length) {
-    h += '<details class="pd"><summary>HID 设备 ' + devs.length + ' 个（点击展开）</summary><div class="devs">'
-      + devs.map(d => '<span title="' + esc((d.product || '') + (d.manufacturer ? ' / ' + d.manufacturer : '')) + (d.skipped ? ' [已跳过]' : '') + '">'
-        + esc(d.vid + ':' + d.pid) + ' · ' + esc(d.usagePage) + (d.skipped ? ' ⛔' : '') + '</span>').join('')
-      + '</div></details>';
-  }
-  return h;
-}
 
 refresh(); refreshHistory();
 setInterval(refresh, 5000);

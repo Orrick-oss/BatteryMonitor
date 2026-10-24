@@ -458,55 +458,6 @@ function atkResult(iface, parsed) {
   };
 }
 
-// 诊断: 遍历所有候选接口 × 协议变体, 记录写结果与收到的每一帧(供「ATK 诊断」按钮)
-async function probeAtk() {
-  const all = nh.devices().filter((d) => isAtkVid(d.vendorId));
-  const ifaces = findAtkInterfaces();
-  const out = {
-    vids: ['0x373B', '0x3554'],
-    devices: all.map((d) => ({
-      vid: '0x' + (d.vendorId || 0).toString(16).toUpperCase(),
-      pid: '0x' + (d.productId || 0).toString(16).toUpperCase(),
-      usagePage: '0x' + (d.usagePage || 0).toString(16).toUpperCase(),
-      usage: '0x' + (d.usage || 0).toString(16).toUpperCase(),
-      product: d.product || '', manufacturer: d.manufacturer || '',
-      skipped: ATK_SKIP_PIDS.has(d.productId),
-    })),
-    attempts: [],
-    result: null,
-  };
-  if (!ifaces.length) {
-    out.verdict = all.length
-      ? '找到 VID 命中但全部被过滤(键盘集合/狼蛛 PID)'
-      : '未发现 VID 373B / 3554 的任何 HID 接口 —— 接收器未插或未被系统识别';
-    return out;
-  }
-  const budget = Date.now() + 20000;   // 诊断最多 20s, 避免页面卡太久
-  for (const variant of ATK_VARIANTS) {
-    const list = [
-      ...ifaces.filter((d) => d.usagePage === variant.usagePage),
-      ...ifaces.filter((d) => d.usagePage !== variant.usagePage),
-    ].slice(0, 4);
-    for (const iface of list) {
-      if (Date.now() > budget) { out.truncated = true; break; }
-      const { parsed, trace } = await atkTryIface(iface, variant);
-      out.attempts.push(trace);
-      if (parsed) {
-        out.result = { battery: parsed.battery, charging: !!parsed.charging, variant: variant.label };
-        out.verdict = '协议命中: ' + variant.label + ', 电量 ' + parsed.battery + '%';
-        return out;
-      }
-    }
-  }
-  const gotFrames = out.attempts.some((a) => a.frames && a.frames.length);
-  out.verdict = gotFrames
-    ? '有回帧但两种协议都未匹配 → 把原始帧发给我, 按帧结构新增变体'
-    : (out.attempts.some((a) => a.writeError)
-      ? '所有长度都写不进去(报 ID 0x08 在该接口不被接受 / 接口无写权限) → 说明接口选错, 把这段发我'
-      : '写成功但零回帧 → 鼠标大概率在休眠, 动一下鼠标再诊断');
-  return out;
-}
-
 // 聚合: 返回所有"接收器在场"的设备查询结果（不在场的直接过滤, 由上层决定如何显示）
 async function queryAll() {
   const [mchose, atk, aula] = await Promise.all([
@@ -541,4 +492,4 @@ if (require.main === module) {
 }
 
 // 导出(放在文件末尾: ATK_VARIANTS 等是 const, 提前导出会踩 TDZ)
-module.exports = { queryBattery, queryAtk, queryAula, queryAll, findControlPath, findAtkInterfaces, bekenChecksum, probeAtk, ATK_VARIANTS, MODES };
+module.exports = { queryBattery, queryAtk, queryAula, queryAll, findControlPath, findAtkInterfaces, atkTryIface, bekenChecksum, ATK_VARIANTS, MODES };

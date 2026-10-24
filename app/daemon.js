@@ -7,7 +7,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
-const { queryAll, probeAtk } = require('./battery');
+const { queryAll } = require('./battery');
 const { iconFor } = require('./icongen');
 const hovercard = require('./hovercard');
 
@@ -435,16 +435,6 @@ const server = http.createServer((req, res) => {
   if (url === '/api/quit' && req.method === 'POST') {    // 安装/卸载程序通过它让常驻服务优雅退出(先回包再退, 避免连接被重置)
     json(res, { ok: true });
     setTimeout(() => { try { systray && systray.kill(true); } catch { } process.exit(0); }, 150);
-    return;
-  }
-  if (url === '/api/atk-probe') {
-    // ATK 协议诊断: 逐个接口 × 协议变体试帧, 返回原始收发帧(排查"在线但无应答")
-    if (state.atkProbing) return json(res, { ok: false, error: '诊断进行中，请稍候' });
-    state.atkProbing = true;
-    probeAtk()
-      .then((r) => json(res, { ok: true, ...r }))
-      .catch((e) => json(res, { ok: false, error: e.message }))
-      .finally(() => { state.atkProbing = false; });
     return;
   }
   if (url === '/api/config' && req.method === 'POST') {
