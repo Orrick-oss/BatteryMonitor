@@ -286,7 +286,7 @@ function initTray() {
     lastIconKey = ''; // (重建后强制刷新一次)
     systray.onClick((action) => {
       const t = action.item && action.item.title;
-      if (!t) { hovercard.reveal(); return; }   // 左键图标 → 弹电量卡片(右键菜单由托盘原生处理)
+      if (!t) return;                           // 左键图标: 由 hovercard 自行检测(托盘助手不发左键事件)
       if (t === '打开状态页') openBrowser();
       else if (t === '立即刷新') poll('manual');
       else if (t === '打开程序目录') openFolder(INSTALL_DIR);
