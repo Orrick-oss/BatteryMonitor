@@ -471,6 +471,7 @@ const server = http.createServer((req, res) => {
 // ---------- 启动 ----------
 function openBrowser() {
   const url = `http://127.0.0.1:${cfg.port}`;
+  log('[状态页] 打开浏览器 → ' + url);
   try { spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore' }).unref(); } catch { }
 }
 

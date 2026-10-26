@@ -59,6 +59,7 @@ function loadLibs() {
   const user32 = koffi.load('user32.dll');
   const gdi32 = koffi.load('gdi32.dll');
   const gdiplus = koffi.load('gdiplus.dll');
+  const shell32 = koffi.load('shell32.dll');
   koffi.struct('HC_RECT', { L: 'long', T: 'long', R: 'long', B: 'long' });
   koffi.struct('HC_POINT', { X: 'long', Y: 'long' });
   koffi.struct('HC_RECTF', { X: 'float', Y: 'float', W: 'float', H: 'float' });
@@ -78,6 +79,8 @@ function loadLibs() {
     GetForegroundWindow: user32.func('void *GetForegroundWindow()'),
     GetDpiForSystem: user32.func('uint32 GetDpiForSystem()'),
     SetProcessDPIAware: user32.func('int SetProcessDPIAware()'),
+    // uintptr_t 版本: 需要把句柄写进 Shell_NotifyIconGetRect 的参数, 要数值形式
+    FindWindowPtr: koffi.load('user32.dll').func('uintptr_t FindWindowW(str16 cls, str16 title)'),
     CreateCompatibleDC: gdi32.func('void *CreateCompatibleDC(void *hdc)'),
     SelectObject: gdi32.func('void *SelectObject(void *hdc, void *obj)'),
     DeleteObject: gdi32.func('int DeleteObject(void *obj)'),
@@ -103,6 +106,8 @@ function loadLibs() {
     DrawLine: gdiplus.func('int32 GdipDrawLine(void *gfx, void *pen, float x1, float y1, float x2, float y2)'),
     CreateFontFamilyFromName: gdiplus.func('int32 GdipCreateFontFamilyFromName(str16 name, void *collection, _Out_ void **family)'),
     CreateFont: gdiplus.func('int32 GdipCreateFont(void *family, float size, int32 style, int32 unit, _Out_ void **font)'),
+    // 托盘图标矩形(systray2 助手的左键事件不吐给 Node, 左键弹卡片只能自己检测)
+    ShellNotifyIconGetRect: shell32.func('int32 Shell_NotifyIconGetRect(void *id, _Out_ HC_RECT *r)'),
     DeleteFont: gdiplus.func('int32 GdipDeleteFont(void *font)'),
     StringFormatGetGenericDefault: gdiplus.func('int32 GdipStringFormatGetGenericDefault(_Out_ void **fmt)'),
     CreateStringFormat: gdiplus.func('int32 GdipCreateStringFormat(int32 flags, int32 lang, _Out_ void **fmt)'),
@@ -134,6 +139,7 @@ function init(opts) {
     fn: F, opts, scale, hwnd: null, taskbar: null, hdcc: null, hdcm: null,
     visible: false, hoverAt: 0, leaveAt: 0, prevDown: false, topTick: 0,
     pinnedUntil: 0, lastOpen: 0,
+    iconRect: null, iconUid: -1, iconTick: 99,
     rect: { L: 0, T: 0, R: 0, B: 0 }, fonts: new Map(), fmts: new Map(), family: null,
     lastSig: '', timer: null,
   };
@@ -406,6 +412,30 @@ function hide() {
   try { S.fn.ShowWindow(S.hwnd, 0); } catch { }
 }
 
+// ---------- 托盘图标位置 ----------
+// systray2 助手(Go, 窗口类 SystrayClass)左键不发消息给 Node → 左键弹卡片只能自己检测。
+// 用 Shell_NotifyIconGetRect 拿图标的精确矩形(命中过的 uID 记住, 下次先试它)。
+function resolveIconRect() {
+  const F = S.fn;
+  const h = F.FindWindowPtr('SystrayClass', null);
+  if (!h) return null;
+  const uids = [];
+  if (S.iconUid >= 0) uids.push(S.iconUid);
+  for (let u = 0; u <= 255; u++) if (u !== S.iconUid) uids.push(u);
+  for (const uid of uids) {
+    const id = Buffer.alloc(40);
+    id.writeUInt32LE(40, 0);              // cbSize
+    id.writeBigUInt64LE(BigInt(h), 8);    // hWnd
+    id.writeUInt32LE(uid, 16);            // uID
+    const r = { L: 0, T: 0, R: 0, B: 0 };
+    if (F.ShellNotifyIconGetRect(id, r) === 0 && r.R > r.L && r.B > r.T) {
+      const w = r.R - r.L, hh = r.B - r.T;
+      if (w > 8 && w < 96 && hh > 8 && hh < 96) { S.iconUid = uid; return r; }
+    }
+  }
+  return null;
+}
+
 function openUrl() {
   // ⚠ 不能用 ShellExecuteW: Node 主线程没有初始化 COM, 点击触发会崩掉整个进程。
   // 走 daemon 注入的 onOpen(cmd /c start, 托盘菜单同款, 稳定)。
@@ -453,13 +483,26 @@ function tick() {
   if (!S.visible && S.hoverAt && now - S.hoverAt >= DWELL) show();
   else if (S.visible && !want && S.leaveAt && now - S.leaveAt >= GRACE) hide();
 
+  // 左键检测: MSB=正按着; LSB=自上次查询以来按过(快速点击不漏检)
+  const lv = F.GetAsyncKeyState(0x01);
+  const lDown = ((lv & 0x8000) | (lv & 0x0001)) !== 0;
+
+  // 图标矩形: 每 ~5s 刷新(托盘重建/移动), 解析失败则 2s 后重试
+  S.iconTick++;
+  if (S.iconRect ? S.iconTick >= 28 : S.iconTick >= 11) {
+    S.iconTick = 0;
+    S.iconRect = resolveIconRect();
+  }
+
+  // 托盘图标左键 → 弹卡片
+  if (lDown && !S.prevDown && !fs && S.iconRect && inRect(cp, S.iconRect)) reveal();
+
   // 卡片内点击 → 打开详情页(去抖: 一次点击只开一次)
-  const down = (F.GetAsyncKeyState(0x01) & 0x8000) !== 0;
-  if (S.visible && down && !S.prevDown && overCard && Date.now() - (S.lastOpen || 0) > 1500) {
+  if (S.visible && lDown && !S.prevDown && overCard && Date.now() - (S.lastOpen || 0) > 1500) {
     S.lastOpen = Date.now();
     openUrl();
   }
-  S.prevDown = down;
+  S.prevDown = lDown;
 
   // 数据/主题变化 → 重绘(仅在可见时)
   if (S.visible && sig() !== S.lastSig) render();
