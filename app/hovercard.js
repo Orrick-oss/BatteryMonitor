@@ -1,23 +1,18 @@
-// hovercard.js — 托盘悬浮层
-// 交互(2026-10-26 定稿):
-//   悬停图标 → 只显示一行纯文字(无卡片底), 简短直观
-//   左键图标 → 弹完整电量卡片(驻留 2.5s), 点击卡片打开详情页
+// hovercard.js — 电量卡片(左键托盘图标弹出)
+// 显隐完全由 daemon 控制: 托盘 worker 发左键事件 → daemon 调 show()。
 // 独立顶层分层窗口 + GDI+ 绘制; 状态无变化不重画, 隐藏时不占 CPU。
 // ⚠ 绝不 SetParent 到任务栏: 跨进程父子窗口会强制共享输入队列, node 一停顿 explorer 就挂死。
 // ⚠ GDI+ 位图持有的 scan0 Buffer 必须保活到下一次 render: koffi 只在单次调用期间 pin Buffer,
-//   调用返回后若 Buffer 被 GC, 位图内部指针悬空 → 堆损坏 → 随机原生崩溃(1.0.10/1.0.11 的崩溃根因)。
+//   调用返回后若 Buffer 被 GC, 位图内部指针悬空 → 堆损坏 → 随机原生崩溃(1.0.10~1.0.11 的崩溃根因)。
 'use strict';
 
-const DWELL = 380;   // 悬停多久显示文字条(ms)
-const GRACE = 300;   // 离开后多久收起(ms)
-const PIN_MS = 2500; // 左键弹卡片后的驻留(ms)
+const PIN_MS = 2500; // 弹出后的驻留(ms), 期间不因光标离开而立刻收起
+const GRACE = 300;   // 光标离开后多久收起(ms)
 const TICK_MS = 180;
 const CARD_W = 296;  // 卡片宽(不含阴影留白)
 const HEAD_H = 38;
 const ROW_H = 56;
 const FOOT_H = 30;
-const TIP_H = 30;    // 文字条高
-const TIP_PAD = 14;  // 文字条水平内边距
 const M = 10;        // 卡片阴影留白
 
 const COL = {
@@ -36,20 +31,16 @@ const STATE = {
   light: { good: '#16A34A', low: '#DC2626', charging: '#0A84FF', offline: '#8E8E93' },
   dark: { good: '#34D058', low: '#FF453A', charging: '#4DA3FF', offline: '#98989F' },
 };
-const TIP_TEXT = { light: '#FFFFFF', dark: '#FFFFFF' };
-const TIP_EDGE = { light: '#000000B4', dark: '#000000B4' };
 const KIND_LABEL = { mouse: '鼠标', keyboard: '键盘', headset: '耳机' };
 const BRAND = { mchose: '迈从', aula: '狼蛛', atk: 'ATK' };
 
-// 宽度估算(不调 GDI+ MeasureString: 本机构建上该接口会段错误)
-function textW(str, px) {
-  return [...str].reduce((a, ch) => a + (ch.charCodeAt(0) > 0x2e80 ? px : px * 0.56), 0);
-}
+// 宽度估算截断(不调 GDI+ MeasureString: 本机构建上该接口会段错误)
 function fit(str, maxW, px) {
-  if (textW(str, px) <= maxW) return str;
+  const w = (s) => [...s].reduce((a, ch) => a + (ch.charCodeAt(0) > 0x2e80 ? px : px * 0.56), 0);
+  if (w(str) <= maxW) return str;
   let out = '';
   for (const ch of str) {
-    if (textW(out + ch + '…', px) > maxW) break;
+    if (w(out + ch + '…') > maxW) break;
     out += ch;
   }
   return out + '…';
@@ -71,14 +62,12 @@ function loadLibs() {
   const user32 = koffi.load('user32.dll');
   const gdi32 = koffi.load('gdi32.dll');
   const gdiplus = koffi.load('gdiplus.dll');
-  const shell32 = koffi.load('shell32.dll');
   koffi.struct('HC_RECT', { L: 'long', T: 'long', R: 'long', B: 'long' });
   koffi.struct('HC_POINT', { X: 'long', Y: 'long' });
   koffi.struct('HC_RECTF', { X: 'float', Y: 'float', W: 'float', H: 'float' });
   const F = {
     CreateWindowExW: user32.func('void *CreateWindowExW(uint32 ex, str16 cls, str16 name, uint32 style, int32 x, int32 y, int32 w, int32 h, void *parent, void *menu, void *inst, void *param)'),
     FindWindowW: user32.func('void *FindWindowW(str16 cls, str16 title)'),
-    FindWindowExW: user32.func('void *FindWindowExW(void *parent, void *after, str16 cls, str16 title)'),
     IsWindow: user32.func('int IsWindow(void *h)'),
     DestroyWindow: user32.func('int DestroyWindow(void *h)'),
     SetWindowPos: user32.func('int SetWindowPos(void *h, void *after, int32 x, int32 y, int32 w, int32 hh, uint32 flags)'),
@@ -91,8 +80,6 @@ function loadLibs() {
     GetForegroundWindow: user32.func('void *GetForegroundWindow()'),
     GetDpiForSystem: user32.func('uint32 GetDpiForSystem()'),
     SetProcessDPIAware: user32.func('int SetProcessDPIAware()'),
-    // uintptr_t 版本: 需要把句柄写进 Shell_NotifyIconGetRect 的参数, 要数值形式
-    FindWindowPtr: user32.func('uintptr_t FindWindowW(str16 cls, str16 title)'),
     CreateCompatibleDC: gdi32.func('void *CreateCompatibleDC(void *hdc)'),
     SelectObject: gdi32.func('void *SelectObject(void *hdc, void *obj)'),
     DeleteObject: gdi32.func('int DeleteObject(void *obj)'),
@@ -119,13 +106,10 @@ function loadLibs() {
     CreateFontFamilyFromName: gdiplus.func('int32 GdipCreateFontFamilyFromName(str16 name, void *collection, _Out_ void **family)'),
     CreateFont: gdiplus.func('int32 GdipCreateFont(void *family, float size, int32 style, int32 unit, _Out_ void **font)'),
     DeleteFont: gdiplus.func('int32 GdipDeleteFont(void *font)'),
-    StringFormatGetGenericDefault: gdiplus.func('int32 GdipStringFormatGetGenericDefault(_Out_ void **fmt)'),
     CreateStringFormat: gdiplus.func('int32 GdipCreateStringFormat(int32 flags, int32 lang, _Out_ void **fmt)'),
     SetStringFormatAlign: gdiplus.func('int32 GdipSetStringFormatAlign(void *fmt, int32 align)'),
     SetStringFormatLineAlign: gdiplus.func('int32 GdipSetStringFormatLineAlign(void *fmt, int32 align)'),
     DrawString: gdiplus.func('int32 GdipDrawString(void *gfx, str16 str, int32 len, void *font, _In_ HC_RECTF *layout, void *format, void *brush)'),
-    // 托盘图标矩形(systray2 助手的左键事件不吐给 Node, 左键弹卡片只能自己检测)
-    ShellNotifyIconGetRect: shell32.func('int32 Shell_NotifyIconGetRect(void *id, _Out_ HC_RECT *r)'),
   };
   return F;
 }
@@ -149,9 +133,8 @@ function init(opts) {
 
   S = {
     fn: F, opts, scale, hwnd: null, taskbar: null, hdcc: null, hdcm: null,
-    visible: false, mode: 'card', hoverAt: 0, leaveAt: 0, prevDown: false, topTick: 0,
+    visible: false, leaveAt: 0, prevDown: false, topTick: 0,
     pinnedUntil: 0, lastOpen: 0,
-    iconRect: null, iconUid: -1, iconTick: 99,
     rect: { L: 0, T: 0, R: 0, B: 0 },
     fonts: new Map(), fmts: new Map(), family: null,
     lastSig: '', timer: null,
@@ -256,25 +239,6 @@ function text(gfx, str, x, y, w, h, px, color, bold, align) {
   F.DrawString(gfx, str, str.length, font, { X: x, Y: y, W: w, H: h }, fmt, b[0]);
   F.DeleteBrush(b[0]);
 }
-// 描边文字(白字黑边, 任意壁纸/明暗背景上都可读): 黑色画 4 向偏移, 再画主色
-function outlinedText(gfx, str, x, y, w, h, px, color, edge, bold) {
-  const F = S.fn;
-  const font = fontOf(px, bold !== false), fmt = fmtOf(1 /*Center*/);
-  if (!font) return;
-  const layout = { X: x, Y: y, W: w, H: h };
-  const eb = [null];
-  if (F.CreateSolidFill(argb(edge), eb) === 0) {
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) {
-      F.DrawString(gfx, str, str.length, font, { X: x + dx, Y: y + dy, W: w, H: h }, fmt, eb[0]);
-    }
-    F.DeleteBrush(eb[0]);
-  }
-  const mb = [null];
-  if (F.CreateSolidFill(argb(color), mb) === 0) {
-    F.DrawString(gfx, str, str.length, font, layout, fmt, mb[0]);
-    F.DeleteBrush(mb[0]);
-  }
-}
 function glyph(gfx, kind, cx, cy, color) {
   const F = S.fn;
   const pen = [null];
@@ -320,85 +284,10 @@ function devState(dv, low) {
   };
 }
 
-// ---------- 渲染: 提交到屏幕 ----------
-function commit(buf, bmp, gfx, W, H, px, py) {
-  const F = S.fn;
-  const hbm = [null];
-  if (F.CreateHBITMAPFromBitmap(bmp[0], hbm, 0) !== 0) {
-    F.DeleteGraphics(gfx[0]); F.DisposeImage(bmp[0]); return false;
-  }
-  const old = F.SelectObject(S.hdcm, hbm[0]);
-  F.SetWindowPos(S.hwnd, null, px, py, W, H, 0x14); // SWP_NOZORDER|SWP_NOACTIVATE
-  const size = Buffer.alloc(8); size.writeInt32LE(W, 0); size.writeInt32LE(H, 4);
-  const ptDst = Buffer.alloc(8); ptDst.writeInt32LE(px, 0); ptDst.writeInt32LE(py, 4);
-  const ptSrc = Buffer.alloc(8);
-  const blend = Buffer.alloc(4); blend[0] = 0; blend[1] = 0; blend[2] = 255; blend[3] = 1;
-  F.UpdateLayeredWindow(S.hwnd, S.hdcc, ptDst, size, S.hdcm, ptSrc, 0, blend, 2 /*ULW_ALPHA*/);
-  F.SelectObject(S.hdcm, old);
-  F.DeleteObject(hbm[0]);
-  F.DeleteGraphics(gfx[0]);
-  F.DisposeImage(bmp[0]);
-  // 位图已释放, 但保险起见把像素内存保活到下一次 render 再放
-  const prev = S.renderBuf;
-  S.renderBuf = buf;
-  return true;
+// ---------- 渲染 ----------
+function render() {
+  try { renderCard(); } catch (e) { log('render 异常: ' + e.message); }
 }
-
-// ---------- 渲染: 悬停文字条(纯文字, 无卡片底) ----------
-function tipText() {
-  const { devs } = devRows();
-  if (!devs.length) return '未发现设备';
-  const parts = devs.slice(0, 4).map((dv) => {
-    const name = (dv.device && dv.device !== '未知设备' ? dv.device : BRAND[dv.key] || '设备');
-    const st = devState(dv, S.opts.getLow() || 20);
-    const bat = st.bat !== null ? st.bat + '%' : '';
-    const tag = !st.online ? '离线' : dv.charging ? '充电中' : dv.full ? '已充满' : '';
-    return [name, bat, tag].filter(Boolean).join(' ');
-  });
-  let line = parts.join(' · ');
-  return fit(line, 560, 13);
-}
-
-function renderTip() {
-  const F = S.fn;
-  const dark = !!S.opts.getTheme();
-  const str = tipText();
-  const px13 = 13;
-  const W = Math.ceil(textW(str, px13)) + TIP_PAD * 2 + 8;
-  const H = TIP_H + 8;
-
-  const buf = Buffer.alloc(W * H * 4);
-  const bmp = [null], gfx = [null];
-  if (F.CreateBitmapFromScan0(W, H, W * 4, 0x0026200A /*ARGB*/, buf, bmp) !== 0) return;
-  if (F.GetImageGraphicsContext(bmp[0], gfx) !== 0) { F.DisposeImage(bmp[0]); return; }
-  F.SetTextRenderingHint(gfx[0], 4);
-
-  const T = dark ? STATE.dark : STATE.light;
-  outlinedText(gfx[0], str, 0, (H - TIP_H) / 2 + 4, W, TIP_H, px13, TIP_TEXT[dark ? 'dark' : 'light'], TIP_EDGE[dark ? 'dark' : 'light'], false);
-
-  // 位置: 托盘图标上方居中
-  const ir = S.iconRect || rectOf(S.taskbar);
-  let px = Math.round((ir.L + ir.R) / 2 - W / 2);
-  let py = ir.T - 10 - H;
-  if (py < 4) py = ir.B + 10;
-  const sm = screenRect();
-  if (px < 4) px = 4;
-  if (px + W > sm.R) px = sm.R - W;
-  if (py + H > sm.B) py = sm.B - H;
-
-  if (commit(buf, bmp, gfx, W, H, px, py)) {
-    S.rect = { L: px, T: py, R: px + W, B: py + H };
-    S.lastSig = sig();
-  }
-}
-
-function screenRect() {
-  const tb = rectOf(S.taskbar);
-  // 简化: 以任务栏为基准推主屏工作区(避免枚举显示器)
-  return tb.T > 400 ? { L: 0, T: 0, R: tb.R, B: tb.T } : { L: 0, T: tb.B, R: tb.R, B: tb.T + 2000 };
-}
-
-// ---------- 渲染: 完整卡片 ----------
 function renderCard() {
   const F = S.fn;
   const dark = !!S.opts.getTheme();
@@ -481,6 +370,12 @@ function renderCard() {
   text(gfx[0], '点击卡片打开详情页', M, footY + 7, CARD_W, 16, 10.5, C.foot, false, 1);
 
   // ---- 提交 ----
+  const hbm = [null];
+  if (F.CreateHBITMAPFromBitmap(bmp[0], hbm, 0) !== 0) {
+    F.DeleteGraphics(gfx[0]); F.DisposeImage(bmp[0]); return;
+  }
+  const old = F.SelectObject(S.hdcm, hbm[0]);
+
   const tb = rectOf(S.taskbar);
   let px = tb.R - 10 - CARD_W - M;
   let py = tb.T - 6 - cardH - M;
@@ -488,73 +383,51 @@ function renderCard() {
   if (px < 8) px = 8;
   if (py < 8) py = 8;
 
-  if (commit(buf, bmp, gfx, W, H, px, py)) {
-    S.rect = { L: px, T: py, R: px + W, B: py + H };
-    S.lastSig = sig();
-  }
+  F.SetWindowPos(S.hwnd, null, px, py, W, H, 0x14); // SWP_NOZORDER|SWP_NOACTIVATE
+  const size = Buffer.alloc(8); size.writeInt32LE(W, 0); size.writeInt32LE(H, 4);
+  const ptDst = Buffer.alloc(8); ptDst.writeInt32LE(px, 0); ptDst.writeInt32LE(py, 4);
+  const ptSrc = Buffer.alloc(8);
+  const blend = Buffer.alloc(4); blend[0] = 0; blend[1] = 0; blend[2] = 255; blend[3] = 1;
+  F.UpdateLayeredWindow(S.hwnd, S.hdcc, ptDst, size, S.hdcm, ptSrc, 0, blend, 2 /*ULW_ALPHA*/);
+
+  F.SelectObject(S.hdcm, old);
+  F.DeleteObject(hbm[0]);
+  F.DeleteGraphics(gfx[0]);
+  F.DisposeImage(bmp[0]);
+  // 位图已释放, 但保险起见把像素内存保活到下一次 render 再放
+  S.renderBuf = buf;
+
+  S.rect = { L: px, T: py, R: px + W, B: py + H };
+  S.lastSig = sig();
 }
 
 function sig() {
   const low = S.opts.getLow() || 20;
   return JSON.stringify([
-    S.opts.getTheme() ? 1 : 0, low, S.mode,
+    S.opts.getTheme() ? 1 : 0, low,
     (S.opts.getData() || []).map((d) => [d.key, d.device, d.battery, d.charging, d.full, d.linked, d.ok, d.present, d.kind]),
     rectOf(S.taskbar),
   ]);
 }
 
 // ---------- 显隐 ----------
-function show(mode) {
-  if (!ensureWindow()) return;
-  if (S.visible && S.mode !== mode) { S.mode = mode; render(); return; }
-  S.mode = mode;
-  S.visible = true;
-  S.fn.ShowWindow(S.hwnd, 4); // SW_SHOWNOACTIVATE
+function show() {
+  if (!S) return;
+  if (!ensureWindow()) { log('ensureWindow 失败'); return; }
+  if (!S.visible) {
+    S.visible = true;
+    S.fn.ShowWindow(S.hwnd, 4); // SW_SHOWNOACTIVATE
+  }
+  S.pinnedUntil = Date.now() + PIN_MS;
   render();
 }
 function hide() {
   if (!S || !S.hwnd) return;
+  if (!S.visible) return;
   S.visible = false;
-  S.hoverAt = 0;
-  S.leaveAt = 0;
   S.pinnedUntil = 0;
+  S.leaveAt = 0;
   try { S.fn.ShowWindow(S.hwnd, 0); } catch { }
-}
-function render() {
-  try {
-    if (S.mode === 'tip') renderTip();
-    else renderCard();
-  } catch (e) { log('render 异常: ' + e.message); }
-}
-
-// ---------- 托盘图标位置 ----------
-// systray2 助手(Go, 窗口类 SystrayClass)左键不发消息给 Node → 左键弹卡片只能自己检测。
-// 用 Shell_NotifyIconGetRect 拿图标的精确矩形(命中过的 uID 记住, 下次先试它)。
-function resolveIconRect() {
-  const F = S.fn;
-  const h = F.FindWindowPtr('SystrayClass', null);
-  if (!h) return null;
-  const uids = [];
-  if (S.iconUid >= 0) uids.push(S.iconUid);
-  for (let u = 0; u <= 255; u++) if (u !== S.iconUid) uids.push(u);
-  for (const uid of uids) {
-    const id = Buffer.alloc(40);
-    id.writeUInt32LE(40, 0);              // cbSize
-    id.writeBigUInt64LE(BigInt(h), 8);    // hWnd
-    id.writeUInt32LE(uid, 16);            // uID
-    const r = { L: 0, T: 0, R: 0, B: 0 };
-    if (F.ShellNotifyIconGetRect(id, r) === 0 && r.R > r.L && r.B > r.T) {
-      const w = r.R - r.L, hh = r.B - r.T;
-      if (w > 8 && w < 96 && hh > 8 && hh < 96) { S.iconUid = uid; return r; }
-    }
-  }
-  return null;
-}
-
-function openUrl() {
-  // ⚠ 不能用 ShellExecuteW: Node 主线程没有初始化 COM, 点击触发会崩掉整个进程。
-  // 走 daemon 注入的 onOpen(cmd /c start, 托盘菜单同款, 稳定)。
-  try { if (S.opts.onOpen) S.opts.onOpen(); } catch { }
 }
 
 // ---------- 主循环 ----------
@@ -568,6 +441,8 @@ function tickInner() {
     S.taskbar = F.FindWindowW('Shell_TrayWnd', null);
     if (!S.taskbar) { hide(); return; }
   }
+  if (!S.visible) return;
+
   const tb = rectOf(S.taskbar);
   const cp = cursor();
 
@@ -579,59 +454,30 @@ function tickInner() {
     if (fr.L <= tb.L && fr.T <= tb.T && fr.R >= tb.R && fr.B >= tb.B) fs = true;
   }
 
-  // 悬停区: 托盘图标区(排除右侧时钟)
-  let hoverTray = false;
-  const tn = F.FindWindowExW(S.taskbar, null, 'TrayNotifyWnd', null);
-  if (tn) {
-    const tr = rectOf(tn);
-    const clockW = Math.round(84 * S.scale);
-    hoverTray = cp.X >= tr.L + 2 && cp.X <= tr.R - clockW && cp.Y >= tr.T && cp.Y <= tr.B;
-  }
-  const overPopup = S.visible && inRect(cp, S.rect);
+  const overCard = inRect(cp, S.rect);
   const now = Date.now();
-  const want = !fs && (hoverTray || overPopup || now < (S.pinnedUntil || 0));
-
-  if (want) {
-    S.leaveAt = 0;
-    if (!S.hoverAt) S.hoverAt = now;
+  const keep = !fs && (overCard || now < (S.pinnedUntil || 0));
+  if (!keep) {
+    if (!S.leaveAt) S.leaveAt = now;
+    else if (now - S.leaveAt >= GRACE) { hide(); return; }
   } else {
-    S.hoverAt = 0;
-    if (S.visible && !S.leaveAt) S.leaveAt = now;
+    S.leaveAt = 0;
   }
-  // 悬停 → 文字条
-  if (!S.visible && S.hoverAt && now - S.hoverAt >= DWELL) show('tip');
-  else if (S.visible && S.mode === 'tip' && S.hoverAt && now - S.hoverAt > 60000) show('tip'); // 数据刷新重画
-  else if (S.visible && !want && S.leaveAt && now - S.leaveAt >= GRACE) hide();
 
-  // 左键: MSB=正按着。弹层内点击只认按下沿(不认 LSB, 否则别处点一下鼠标经过弹层就误开浏览器)
+  // 卡片内左键按下沿 → 打开详情页(去抖 3s)
   const lDown = (F.GetAsyncKeyState(0x01) & 0x8000) !== 0;
   const pressEdge = lDown && !S.prevDown;
-
-  // 图标矩形: 每 ~5s 刷新(托盘重建/移动), 解析失败则 2s 后重试
-  S.iconTick++;
-  if (S.iconRect ? S.iconTick >= 28 : S.iconTick >= 11) {
-    S.iconTick = 0;
-    S.iconRect = resolveIconRect();
-  }
-
-  // 托盘图标左键 → 弹完整卡片(悬停时只显示文字条, 左键才是卡片 → 两者可区分)
-  if (pressEdge && !fs && S.iconRect && inRect(cp, S.iconRect)) {
-    S.pinnedUntil = Date.now() + PIN_MS;
-    show('card');
-  }
-
-  // 弹层内点击 → 打开详情页(按下沿 + 3s 防抖)
-  if (S.visible && pressEdge && overPopup && now - (S.lastOpen || 0) > 3000) {
+  if (pressEdge && overCard && now - (S.lastOpen || 0) > 3000) {
     S.lastOpen = now;
-    openUrl();
+    try { if (S.opts.onOpen) S.opts.onOpen(); } catch { }
   }
   S.prevDown = lDown;
 
-  // 数据/主题变化 → 重绘(仅在可见时)
-  if (S.visible && sig() !== S.lastSig) render();
+  // 数据/主题变化 → 重绘
+  if (sig() !== S.lastSig) render();
 
   // 周期重申置顶(explorer 会把自己顶回最上层)
-  if (S.visible && ++S.topTick >= 16) {
+  if (++S.topTick >= 16) {
     S.topTick = 0;
     try { F.SetWindowPos(S.hwnd, -1, 0, 0, 0, 0, 0x13); } catch { }
   }
@@ -650,4 +496,4 @@ function notify() {
   render();
 }
 
-module.exports = { init, notify, dispose, hide };
+module.exports = { init, show, hide, notify, dispose };

@@ -30,7 +30,7 @@ log(`daemon 启动 pid=${process.pid}`);
 for (const sig of ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection']) {
   process.on(sig, (e) => {
     log(`退出(${sig}): ${e && e.stack ? e.stack.split('\n')[0] : e || ''}`);
-    try { systray && systray.kill(true); } catch { }
+    try { tray && tray.kill(); } catch { }
     process.exit(sig === 'SIGINT' || sig === 'SIGTERM' ? 0 : 1);
   });
 }
@@ -111,6 +111,8 @@ function checkLowBattery(ds) {
 
 function notify(title, msg) {
   console.log(`\x07 [提醒] ${title} — ${msg}`);
+  try { if (tray) { tray.notify(title, msg); return; } } catch { }
+  // 兜底: 托盘不可用时走 PowerShell 气泡
   try {
     spawn('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command',
       'Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; ' +
@@ -232,8 +234,9 @@ function setStartup(on) {
   log('[自启] ' + (on ? '已开启' : '已关闭') + ' (' + RUN_KEY + '\\' + RUN_VALUE + ')');
 }
 
-// ---------- 托盘 ----------
-let systray = null;
+// ---------- 托盘(自实现: worker 线程 + Shell_NotifyIconW, 替换 systray2) ----------
+// systray2 的 Go 助手把「左键」也渲染成菜单, 与「左键弹卡片」冲突, 故整体替换。
+let tray = null;
 const KIND_LABEL = { mouse: '鼠标', keyboard: '键盘', headset: '耳机' };
 // 安装目录(展示"打开程序目录"、卸载入口用); 源码运行时退化为 app 目录的上级
 const INSTALL_DIR = process.env.BM_EXE_DIR || (IS_SEA ? path.dirname(process.execPath) : path.dirname(ROOT));
@@ -280,36 +283,48 @@ function buildMenu() {
 }
 function initTray() {
   if (process.argv.includes('--no-tray')) return;
+  if (tray) return;
   try {
-    const Systray = require('systray2').default;
-    systray = new Systray({ menu: buildMenu(), debug: false, copyDir: false });
-    lastIconKey = ''; // (重建后强制刷新一次)
-    systray.onClick((action) => {
-      const t = action.item && action.item.title;
-      if (!t) return;                           // 左键图标: 由 hovercard 自行检测(托盘助手不发左键事件)
-      if (t === '打开状态页') openBrowser();
-      else if (t === '立即刷新') poll('manual');
-      else if (t === '打开程序目录') openFolder(INSTALL_DIR);
-      else if (t === '开机自启' || (t && t.startsWith('开机自启：'))) {
-        const on = !autoStartOn;
-        setStartup(on);
-        // 即时反馈: Windows 气泡通知
-        notify(`开机自启已${on ? '开启' : '关闭'}`, on ? '开机后将自动启动电量监视' : '开机后将不再自动启动');
-        // update-menu 在 Windows 上刷不动菜单项文字, 整个托盘重建才可靠
-        // kill(false): 只退出托盘二进制, 不退出 Node 进程(默认 true 会 process.exit 带崩 daemon)
-        try { systray.kill(false); } catch { }
-        systray = null;
-        setTimeout(initTray, 400);
-      }
-      else if (t === '退出') { try { systray.kill(true); } catch { } process.exit(0); }
+    const { TrayWin } = require('./traywin');
+    tray = new TrayWin({
+      log,
+      // 左键托盘图标 → 弹电量卡片
+      onLeftClick: () => {
+        try { hovercard.show(); } catch (e) { log('[托盘] 左键弹卡片失败: ' + e.message); }
+      },
+      onMenu: handleMenu,
+      // worker 意外退出 → 重建(看门狗兜底之一)
+      onLost: () => {
+        if (!tray) return;
+        tray = null;
+        log('[托盘] worker 退出, 1s 后重建…');
+        setTimeout(() => { initTray(); updateTray(); }, 1000);
+      },
     });
+    lastIconKey = ''; // (重建后强制刷新一次)
+    tray.update(buildMenu());
     // Win11 默认把新托盘图标折叠进隐藏区，启动后自动提升为常显
     scheduleTrayPromote();
     startTrayWatchdog();
   } catch (e) {
     log('[托盘] 初始化失败(不影响其它功能): ' + e.message);
-    systray = null;
+    try { tray && tray.terminate(); } catch { }
+    tray = null;
   }
+}
+
+function handleMenu(t) {
+  if (!t) return;
+  if (t === '打开状态页') openBrowser();
+  else if (t === '立即刷新') poll('manual');
+  else if (t === '打开程序目录') openFolder(INSTALL_DIR);
+  else if (t === '开机自启' || t.startsWith('开机自启：')) {
+    const on = !autoStartOn;
+    setStartup(on);
+    notify(`开机自启已${on ? '开启' : '关闭'}`, on ? '开机后将自动启动电量监视' : '开机后将不再自动启动');
+    updateTray(); // 菜单勾选态刷新(自建托盘直接改菜单数据, 无需重建)
+  }
+  else if (t === '退出') { try { tray && tray.kill(); } catch { } process.exit(0); }
 }
 
 // 看门狗: 托盘二进制意外退出时自动重建（30s 周期）
@@ -317,21 +332,20 @@ let trayWatchdogTimer = null;
 function startTrayWatchdog() {
   clearInterval(trayWatchdogTimer);
   trayWatchdogTimer = setInterval(() => {
-    if (!systray) return;
+    if (!tray) return;
+    // 自实现托盘: worker 存活即托盘在; worker 退出走 onLost 重建。
+    // 这里兜底检测: 若 onLost 重建链路失效(既无 tray 又无重建计时), 强拉一次。
     try {
-      const out = require('child_process')
-        .execSync('tasklist /FI "IMAGENAME eq tray_windows_release.exe" /NH', { encoding: 'utf8', windowsHide: true });
-      if (!/tray_windows_release/i.test(out)) {
-        log('[看门狗] 托盘进程消失，重建…');
-        try { systray.kill(false); } catch { }
-        systray = null;
-        setTimeout(() => { initTray(); updateTray(); }, 800);
-      }
-    } catch { /* 检测失败下轮再试 */ }
+      if (!tray.w || tray.w.threadId == null) throw new Error('worker 无效');
+    } catch {
+      try { tray.terminate(); } catch { }
+      tray = null;
+      setTimeout(() => { initTray(); updateTray(); }, 800);
+    }
   }, 30000);
 }
 
-// 把 NotifyIconSettings 中托盘二进制的 IsPromoted 置 1（尽力而为，失败不影响主流程）
+// 把 NotifyIconSettings 中托盘图标的 IsPromoted 置 1（尽力而为，失败不影响主流程）
 // Win11 默认把新托盘图标折叠进隐藏区(^)。写 NotifyIconSettings\IsPromoted=1 可让其常显,
 // 但该值只在图标"注册那一刻"读取 —— 所以写完必须重建一次托盘才生效。
 let trayPromoteRestarted = false;
@@ -343,13 +357,13 @@ function promoteTrayIconOnce() {
     out = execFileSync('reg', ['query', 'HKCU\\Control Panel\\NotifyIconSettings', '/s', '/v', 'ExecutablePath'],
       { encoding: 'utf8', windowsHide: true, timeout: 5000 });
   } catch { return false; }
-  const helperDir = path.join(ROOT, 'node_modules', 'systray2', 'traybin').toLowerCase();
+  const selfExe = process.execPath.toLowerCase();
   const keys = [];
   let cur = null;
   for (const raw of out.split(/\r?\n/)) {
     const t = raw.trim();
     if (/^HKEY_/i.test(t)) { cur = t; continue; }
-    if (cur && /tray_windows_release\.exe/i.test(t) && t.toLowerCase().includes(helperDir)) keys.push(cur);
+    if (cur && /batterymonitor\.exe$/i.test(t) && t.toLowerCase().includes(path.dirname(selfExe).toLowerCase())) keys.push(cur);
   }
   let changed = false;
   for (const k of keys) {
@@ -366,9 +380,9 @@ function promoteTrayIconOnce() {
   return changed;
 }
 function restartTray() {
-  try { systray.kill(false); } catch { }
-  systray = null;
-  setTimeout(initTray, 400);
+  try { tray && tray.kill(); } catch { }
+  tray = null;
+  setTimeout(() => { initTray(); updateTray(); }, 400);
 }
 // 首次运行时注册表项可能还没生成, 多次重试; 一旦写入成功就重建托盘让它立刻可见
 function scheduleTrayPromote() {
@@ -385,7 +399,7 @@ function scheduleTrayPromote() {
 }
 let lastIconKey = '';
 function updateTray() {
-  if (!systray) return;
+  if (!tray) return;
   refreshTheme();
   const key = JSON.stringify([
     deviceList().map((d) => [d.key, d.battery, d.charging, d.full, d.linked, d.ok, d.kind]),
@@ -396,7 +410,7 @@ function updateTray() {
   ]);
   if (key === lastIconKey) return;
   lastIconKey = key;
-  try { systray.sendAction({ type: 'update-menu', menu: buildMenu() }); } catch { }
+  try { tray.update(buildMenu()); } catch { }
 }
 
 // ---------- HTTP ----------
@@ -435,7 +449,7 @@ const server = http.createServer((req, res) => {
   }
   if (url === '/api/quit' && req.method === 'POST') {    // 安装/卸载程序通过它让常驻服务优雅退出(先回包再退, 避免连接被重置)
     json(res, { ok: true });
-    setTimeout(() => { try { systray && systray.kill(true); } catch { } process.exit(0); }, 150);
+    setTimeout(() => { try { tray && tray.kill(); } catch { } process.exit(0); }, 150);
     return;
   }
   if (url === '/api/config' && req.method === 'POST') {

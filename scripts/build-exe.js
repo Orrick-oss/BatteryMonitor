@@ -46,8 +46,8 @@ fs.rmSync(STAGE, { recursive: true, force: true });
 fs.mkdirSync(STAGE, { recursive: true });
 
 // 代码文件(排除开发用脚本/运行时数据)
-const CODE = ['daemon.js', 'launch.js', 'hovercard.js', 'icongen.js', 'battery.js',
-  'package.json', 'config.json', 'battery.ico'];
+const CODE = ['daemon.js', 'launch.js', 'hovercard.js', 'traywin.js', 'tray-worker.js',
+  'icongen.js', 'battery.js', 'package.json', 'config.json', 'battery.ico'];
 for (const f of CODE) {
   const src = path.join(APP, f);
   if (fs.existsSync(src)) fs.copyFileSync(src, path.join(STAGE, f));
@@ -70,13 +70,6 @@ function prunePrebuilds(base, keepRe) {
 }
 prunePrebuilds(path.join(STAGE, 'node_modules', 'node-hid', 'prebuilds'), /^HID-win32-x64$/);
 prunePrebuilds(path.join(STAGE, 'node_modules', 'koffi', 'prebuilds'), /^win32_x64$/);
-// systray2 只留 Windows 托盘程序(darwin/linux 各 ~4MB)
-const TRAYBIN = path.join(STAGE, 'node_modules', 'systray2', 'traybin');
-if (fs.existsSync(TRAYBIN)) {
-  for (const d of fs.readdirSync(TRAYBIN)) {
-    if (!/^tray_windows/i.test(d)) fs.rmSync(path.join(TRAYBIN, d), { force: true });
-  }
-}
 // 文档类文件不进包
 (function pruneDocs(dir) {
   for (const name of fs.readdirSync(dir)) {
