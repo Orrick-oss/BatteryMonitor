@@ -59,7 +59,6 @@ function loadLibs() {
   const user32 = koffi.load('user32.dll');
   const gdi32 = koffi.load('gdi32.dll');
   const gdiplus = koffi.load('gdiplus.dll');
-  const shell32 = koffi.load('shell32.dll');
   koffi.struct('HC_RECT', { L: 'long', T: 'long', R: 'long', B: 'long' });
   koffi.struct('HC_POINT', { X: 'long', Y: 'long' });
   koffi.struct('HC_RECTF', { X: 'float', Y: 'float', W: 'float', H: 'float' });
@@ -79,7 +78,6 @@ function loadLibs() {
     GetForegroundWindow: user32.func('void *GetForegroundWindow()'),
     GetDpiForSystem: user32.func('uint32 GetDpiForSystem()'),
     SetProcessDPIAware: user32.func('int SetProcessDPIAware()'),
-    ShellExecuteW: shell32.func('void *ShellExecuteW(void *h, str16 verb, str16 file, str16 args, str16 dir, int32 show)'),
     CreateCompatibleDC: gdi32.func('void *CreateCompatibleDC(void *hdc)'),
     SelectObject: gdi32.func('void *SelectObject(void *hdc, void *obj)'),
     DeleteObject: gdi32.func('int DeleteObject(void *obj)'),
@@ -135,6 +133,7 @@ function init(opts) {
   S = {
     fn: F, opts, scale, hwnd: null, taskbar: null, hdcc: null, hdcm: null,
     visible: false, hoverAt: 0, leaveAt: 0, prevDown: false, topTick: 0,
+    pinnedUntil: 0, lastOpen: 0,
     rect: { L: 0, T: 0, R: 0, B: 0 }, fonts: new Map(), fmts: new Map(), family: null,
     lastSig: '', timer: null,
   };
@@ -403,11 +402,14 @@ function hide() {
   S.visible = false;
   S.hoverAt = 0;
   S.leaveAt = 0;
+  S.pinnedUntil = 0;
   try { S.fn.ShowWindow(S.hwnd, 0); } catch { }
 }
 
 function openUrl() {
-  try { S.fn.ShellExecuteW(null, 'open', S.opts.url || 'http://127.0.0.1:8787', null, null, 1); } catch { }
+  // ⚠ 不能用 ShellExecuteW: Node 主线程没有初始化 COM, 点击触发会崩掉整个进程。
+  // 走 daemon 注入的 onOpen(cmd /c start, 托盘菜单同款, 稳定)。
+  try { if (S.opts.onOpen) S.opts.onOpen(); } catch { }
 }
 
 // ---------- 主循环 ----------
@@ -438,8 +440,8 @@ function tick() {
     hoverTray = cp.X >= tr.L + 2 && cp.X <= tr.R - clockW && cp.Y >= tr.T && cp.Y <= tr.B;
   }
   const overCard = S.visible && inRect(cp, S.rect);
-  const want = !fs && (hoverTray || overCard);
   const now = Date.now();
+  const want = !fs && (hoverTray || overCard || now < (S.pinnedUntil || 0));
 
   if (want) {
     S.leaveAt = 0;
@@ -451,9 +453,12 @@ function tick() {
   if (!S.visible && S.hoverAt && now - S.hoverAt >= DWELL) show();
   else if (S.visible && !want && S.leaveAt && now - S.leaveAt >= GRACE) hide();
 
-  // 卡片内点击 → 打开详情页
+  // 卡片内点击 → 打开详情页(去抖: 一次点击只开一次)
   const down = (F.GetAsyncKeyState(0x01) & 0x8000) !== 0;
-  if (S.visible && down && !S.prevDown && overCard) openUrl();
+  if (S.visible && down && !S.prevDown && overCard && Date.now() - (S.lastOpen || 0) > 1500) {
+    S.lastOpen = Date.now();
+    openUrl();
+  }
   S.prevDown = down;
 
   // 数据/主题变化 → 重绘(仅在可见时)
@@ -464,6 +469,13 @@ function tick() {
     S.topTick = 0;
     try { F.SetWindowPos(S.hwnd, -1, 0, 0, 0, 0, 0x13); } catch { }
   }
+}
+
+// 左键托盘图标 → 直接弹出卡片(短暂驻留, 鼠标离开后照常收起)
+function reveal() {
+  if (!S) return;
+  S.pinnedUntil = Date.now() + 2500;
+  show();
 }
 
 function dispose() {
@@ -479,4 +491,4 @@ function notify() {
   try { render(); } catch { }
 }
 
-module.exports = { init, notify, dispose, hide };
+module.exports = { init, notify, dispose, hide, reveal };

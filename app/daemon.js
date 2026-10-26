@@ -286,6 +286,7 @@ function initTray() {
     lastIconKey = ''; // (重建后强制刷新一次)
     systray.onClick((action) => {
       const t = action.item && action.item.title;
+      if (!t) { hovercard.reveal(); return; }   // 左键图标 → 弹电量卡片(右键菜单由托盘原生处理)
       if (t === '打开状态页') openBrowser();
       else if (t === '立即刷新') poll('manual');
       else if (t === '打开程序目录') openFolder(INSTALL_DIR);
@@ -489,7 +490,7 @@ server.listen(cfg.port, '127.0.0.1', () => {
     getData: deviceList,
     getLow: () => cfg.lowThreshold,
     getTheme: () => darkTheme,
-    url: `http://127.0.0.1:${cfg.port}`,
+    onOpen: openBrowser,
     log,
   });
   poll('boot').then(() => {
