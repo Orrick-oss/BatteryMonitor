@@ -4,10 +4,12 @@
 // ⚠ 绝不 SetParent 到任务栏: 跨进程父子窗口会强制共享输入队列, node 一停顿 explorer 就挂死。
 // ⚠ GDI+ 位图持有的 scan0 Buffer 必须保活到下一次 render: koffi 只在单次调用期间 pin Buffer,
 //   调用返回后若 Buffer 被 GC, 位图内部指针悬空 → 堆损坏 → 随机原生崩溃(1.0.10~1.0.11 的崩溃根因)。
+// ⚠ 卡片窗口必须定期泵消息(tick 里 PeekMessageW 排水), 否则被系统判定未响应:
+//   悬停转圈/点击黑框(1.0.13 的"崩溃边缘"观感根因, 实为假死窗口)。
 'use strict';
 
-const PIN_MS = 2500; // 弹出后的驻留(ms), 期间不因光标离开而立刻收起
-const GRACE = 300;   // 光标离开后多久收起(ms)
+const PIN_MS = 8000; // 弹出后的驻留(ms), 期间不因光标离开而立刻收起
+const GRACE = 500;   // 光标离开后多久收起(ms)
 const TICK_MS = 180;
 const CARD_W = 296;  // 卡片宽(不含阴影留白)
 const HEAD_H = 38;
@@ -78,6 +80,10 @@ function loadLibs() {
     GetCursorPos: user32.func('int GetCursorPos(_Out_ HC_POINT *p)'),
     GetAsyncKeyState: user32.func('int16 GetAsyncKeyState(int32 key)'),
     GetForegroundWindow: user32.func('void *GetForegroundWindow()'),
+    // 消息泵: MSG 结构用 48B Buffer 直传(void*), 只为排水不取字段
+    PeekMessageW: user32.func('int PeekMessageW(void *msg, void *hwnd, uint32 min, uint32 max, uint32 remove)'),
+    TranslateMessage: user32.func('int TranslateMessage(void *msg)'),
+    DispatchMessageW: user32.func('int64 DispatchMessageW(void *msg)'),
     GetDpiForSystem: user32.func('uint32 GetDpiForSystem()'),
     SetProcessDPIAware: user32.func('int SetProcessDPIAware()'),
     CreateCompatibleDC: gdi32.func('void *CreateCompatibleDC(void *hdc)'),
@@ -139,6 +145,7 @@ function init(opts) {
     fonts: new Map(), fmts: new Map(), family: null,
     lastSig: '', timer: null,
     renderBuf: null, // GDI+ 位图持有的像素内存, 必须保活(见文件头注释)
+    msg: null,       // 消息泵缓冲(48B MSG)
   };
   // 字体族: 优先微软雅黑 UI(中英混排都清晰)
   for (const name of ['Microsoft YaHei UI', 'Segoe UI']) {
@@ -148,6 +155,7 @@ function init(opts) {
   if (!S.family) { S = null; return false; }
 
   if (!ensureWindow()) { S = null; return false; }
+  S.msg = Buffer.alloc(48);
   S.timer = setInterval(tick, TICK_MS);
   if (S.timer.unref) S.timer.unref();
   log('已启动 scale=' + scale);
@@ -410,6 +418,19 @@ function sig() {
   ]);
 }
 
+// ---------- 消息泵 ----------
+// 卡片窗口由本进程创建, 但 JS 线程从不取消息 → 系统挂起检测(IsHungAppWindow, >5s 不取消息)
+// 会把它标记为"未响应": 悬停转圈、点击画 ghost 黑框。必须定期排水。
+// 消息随到随排即可, 不需要真正处理(Static 类无自定义逻辑, DefWindowProc 兜底)。
+function pump() {
+  const F = S.fn;
+  for (let i = 0; i < 50; i++) {
+    if (!F.PeekMessageW(S.msg, S.hwnd, 0, 0, 1 /*PM_REMOVE*/)) break;
+    F.TranslateMessage(S.msg);
+    F.DispatchMessageW(S.msg);
+  }
+}
+
 // ---------- 显隐 ----------
 function show() {
   if (!S) return;
@@ -437,6 +458,7 @@ function tick() {
 function tickInner() {
   if (!S || !S.hwnd) return;
   const F = S.fn;
+  pump(); // 无论可见与否都排水, 保持窗口"响应"状态
   if (!S.taskbar || !F.IsWindow(S.taskbar)) {
     S.taskbar = F.FindWindowW('Shell_TrayWnd', null);
     if (!S.taskbar) { hide(); return; }
