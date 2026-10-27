@@ -8,7 +8,7 @@
 //   悬停转圈/点击黑框(1.0.13 的"崩溃边缘"观感根因, 实为假死窗口)。
 'use strict';
 
-const PIN_MS = 8000; // 弹出后的驻留(ms), 期间不因光标离开而立刻收起
+const PIN_MS = 30000; // 弹出后的驻留(ms); 期间点击卡片外任意处也会立即收起
 const GRACE = 500;   // 光标离开后多久收起(ms)
 const TICK_MS = 180;
 const CARD_W = 296;  // 卡片宽(不含阴影留白)
@@ -486,12 +486,22 @@ function tickInner() {
     S.leaveAt = 0;
   }
 
-  // 卡片内左键按下沿 → 打开详情页(去抖 3s)
+  // 左键按下沿: 卡片内 → 打开详情页并收起(去抖 3s); 卡片外 → 收起
   const lDown = (F.GetAsyncKeyState(0x01) & 0x8000) !== 0;
   const pressEdge = lDown && !S.prevDown;
-  if (pressEdge && overCard && now - (S.lastOpen || 0) > 3000) {
-    S.lastOpen = now;
-    try { if (S.opts.onOpen) S.opts.onOpen(); } catch { }
+  if (pressEdge) {
+    if (overCard && now - (S.lastOpen || 0) > 3000) {
+      S.lastOpen = now;
+      try { if (S.opts.onOpen) S.opts.onOpen(); } catch { }
+      S.prevDown = lDown;
+      hide();
+      return;
+    }
+    if (!overCard) {
+      S.prevDown = lDown;
+      hide();
+      return;
+    }
   }
   S.prevDown = lDown;
 

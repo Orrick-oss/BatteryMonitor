@@ -1,9 +1,9 @@
-// traye2e.js — 托盘左键→卡片 e2e 验证(v1.0.14)
+// traye2e.js — 托盘左键→卡片 e2e 验证(v1.0.15)
 // 检查点:
 //   A. PostMessage 模拟左键 → 卡片窗口出现
 //   B. 卡片可见 >5s(超过挂起检测阈值)期间 SendMessageTimeout 一直成功 → 未被系统判定"未响应"
-//      (1.0.13 的悬停转圈/点击黑框 = 窗口被判定未响应, 本项直接验证修复)
-//   C. 8s 驻留 + 0.5s 宽限后自动收起
+//   C. t≈10s 仍可见(1.0.14 曾出现"来不及点就消失", 驻留已延长到 30s)
+//   D. ~31s 后自动收起
 'use strict';
 const koffi = require('koffi');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -48,12 +48,17 @@ function responsive(hwnd) {
     console.log(`B. t≈${t}s 可见=${vis} 响应=${resp}`);
   }
 
-  // C. 驻留结束自动收起
+  // C. 30s 驻留内不应提前收起
   await sleep(3000);
   const visC = F.IsWindowVisible(card);
-  console.log(`C. ~10s 后可见(应0)=${visC}`);
+  console.log(`C. ~10s 仍可见(应1)=${visC}`);
 
-  const pass = visA === 1 && respA && allResp && visC === 0;
+  // D. 30s 驻留 + 0.5s 宽限后自动收起
+  await sleep(22000);
+  const visD = F.IsWindowVisible(card);
+  console.log(`D. ~33s 后可见(应0)=${visD}`);
+
+  const pass = visA === 1 && respA && allResp && visC === 1 && visD === 0;
   console.log(pass ? 'PASS' : 'FAIL');
   process.exit(pass ? 0 : 1);
 })();
