@@ -290,7 +290,7 @@ function initTray() {
       log,
       // 左键托盘图标 → 弹电量卡片
       onLeftClick: () => {
-        try { hovercard.show(); } catch (e) { log('[托盘] 左键弹卡片失败: ' + e.message); }
+        try { log('[托盘] 左键 → 弹卡片'); hovercard.show(); } catch (e) { log('[托盘] 左键弹卡片失败: ' + e.message); }
       },
       onMenu: handleMenu,
       // worker 意外退出 → 重建(看门狗兜底之一)

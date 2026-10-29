@@ -84,6 +84,7 @@ function loadLibs() {
     PeekMessageW: user32.func('int PeekMessageW(void *msg, void *hwnd, uint32 min, uint32 max, uint32 remove)'),
     TranslateMessage: user32.func('int TranslateMessage(void *msg)'),
     DispatchMessageW: user32.func('int64 DispatchMessageW(void *msg)'),
+    GetClassNameW: user32.func('int GetClassNameW(void *h, void *name, int max)'),
     GetDpiForSystem: user32.func('uint32 GetDpiForSystem()'),
     SetProcessDPIAware: user32.func('int SetProcessDPIAware()'),
     CreateCompatibleDC: gdi32.func('void *CreateCompatibleDC(void *hdc)'),
@@ -438,16 +439,25 @@ function show() {
   if (!S.visible) {
     S.visible = true;
     S.fn.ShowWindow(S.hwnd, 4); // SW_SHOWNOACTIVATE
+    log('show');
   }
   S.pinnedUntil = Date.now() + PIN_MS;
+  // 同步按键基线: 弹出瞬间若左键仍按下(如快速连点), 不把旧按下当作新的"卡片外点击"
+  try { S.prevDown = (S.fn.GetAsyncKeyState(0x01) & 0x8000) !== 0; } catch { }
   render();
 }
-function hide() {
+function hide(reason) {
   if (!S || !S.hwnd) return;
   if (!S.visible) return;
   S.visible = false;
   S.pinnedUntil = 0;
   S.leaveAt = 0;
+  try {
+    const fg = S.fn.GetForegroundWindow();
+    const b = Buffer.alloc(512);
+    S.fn.GetClassNameW(fg, b, 256);
+    log('hide: ' + (reason || '?') + ' 前台=' + b.toString('utf16le').replace(/\0+$/, ''));
+  } catch { }
   try { S.fn.ShowWindow(S.hwnd, 0); } catch { }
 }
 
@@ -469,11 +479,14 @@ function tickInner() {
   const cp = cursor();
 
   // 全屏应用 → 收起(不打扰)
+  // ⚠ 排除 explorer 壳窗口: 真人点击托盘图标后前台就是任务栏(Shell_TrayWnd),
+  //   其矩形"包含"任务栏自身 → 若不排除会被误判为全屏, 卡片弹出 ~0.5s 即消失(1.0.15 的 bug)
   let fs = false;
   const fg = F.GetForegroundWindow();
-  if (fg) {
+  if (fg && fg !== S.taskbar) {
     const fr = rectOf(fg);
-    if (fr.L <= tb.L && fr.T <= tb.T && fr.R >= tb.R && fr.B >= tb.B) fs = true;
+    const sameAsTaskbar = fr.L === tb.L && fr.T === tb.T && fr.R === tb.R && fr.B === tb.B;
+    if (!sameAsTaskbar && fr.L <= tb.L && fr.T <= tb.T && fr.R >= tb.R && fr.B >= tb.B) fs = true;
   }
 
   const overCard = inRect(cp, S.rect);
@@ -481,7 +494,7 @@ function tickInner() {
   const keep = !fs && (overCard || now < (S.pinnedUntil || 0));
   if (!keep) {
     if (!S.leaveAt) S.leaveAt = now;
-    else if (now - S.leaveAt >= GRACE) { hide(); return; }
+    else if (now - S.leaveAt >= GRACE) { hide('宽限超时 fs=' + fs); return; }
   } else {
     S.leaveAt = 0;
   }
@@ -494,12 +507,12 @@ function tickInner() {
       S.lastOpen = now;
       try { if (S.opts.onOpen) S.opts.onOpen(); } catch { }
       S.prevDown = lDown;
-      hide();
+      hide('点卡片开详情');
       return;
     }
     if (!overCard) {
       S.prevDown = lDown;
-      hide();
+      hide('卡片外点击');
       return;
     }
   }
