@@ -98,7 +98,7 @@ setInterval(applyRetention, 3600e3);
 applyRetention(); // 启动时先清一次(兼容历史遗留的超期数据)
 
 // ---------- 状态（多设备） ----------
-// state.devices: Map(key → { key, brand, device, ok, battery, charging, full, mode, linked, error, lastOk, lowAlerted })
+// state.devices: Map(key → { key, brand, device, ok, battery, charging, full, mode, linked, error, lastOk, lowAlerted, lowStreak })
 const state = { devices: new Map(), lastTry: null };
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const deviceList = () => [...state.devices.values()];
@@ -122,13 +122,22 @@ function tooltipText() {
 }
 
 // 托盘图标取"最值得展示"的设备: 在线 > 成功读数 > 第一个在场
+// 低电量报警需连续 LOW_STREAK 轮满足条件才触发:
+// 充电标志是接收器帧里的单个 bit, 插电后要延迟 1~2 轮才置位且偶发丢位;
+// 若单轮即报, 充电中一次丢位 + 电量尚在阈值下 → 误弹"请尽快充电"。
+const LOW_STREAK = 2;
 function checkLowBattery(ds) {
   const active = ds.ok && ds.linked && !ds.charging && !ds.full && ds.battery !== null;
-  if (active && ds.battery <= cfg.lowThreshold && !ds.lowAlerted) {
-    ds.lowAlerted = true;
-    notify(`${ds.device} 电量低：${ds.battery}%`, '请尽快充电');
-  } else if (!active || ds.battery > cfg.lowThreshold + 5) {
-    ds.lowAlerted = false;
+  if (active && ds.battery <= cfg.lowThreshold) {
+    ds.lowStreak = (ds.lowStreak || 0) + 1;
+    if (ds.lowStreak >= LOW_STREAK && !ds.lowAlerted) {
+      ds.lowAlerted = true;
+      notify(`${ds.device} 电量低：${ds.battery}%`, '请尽快充电');
+    }
+  } else {
+    ds.lowStreak = 0;
+    // 报警状态的解除: 不在场/恢复充电/电量回升超阈值+5
+    if (!active || ds.battery > cfg.lowThreshold + 5) ds.lowAlerted = false;
   }
 }
 
@@ -503,7 +512,7 @@ const server = http.createServer((req, res) => {
           applyRetention(); // 缩短保留天数时立即清理
         }
         saveCfg();
-        for (const ds of state.devices.values()) ds.lowAlerted = false;
+        for (const ds of state.devices.values()) { ds.lowAlerted = false; ds.lowStreak = 0; }
         poll('manual');
         json(res, { ok: true, cfg });
       } catch (e) { json(res, { ok: false, error: e.message }); }
