@@ -53,6 +53,12 @@
   .settings button { padding: 5px 14px; border: none; border-radius: 8px; background: var(--blue); color: #fff; font-size: 12px; cursor: pointer; }
   .settings button.ghost { background: transparent; color: var(--blue); border: 1px solid var(--blue); }
   .settings .tip { margin-left: auto; font-size: 11.5px; }
+  .settings .grow { line-height: 1.4; }
+  .settings .grow b { color: var(--text); font-size: 12.5px; display: block; }
+  .settings .grow span { font-size: 11px; }
+  .settings button.danger { background: transparent; color: var(--red); border: 1px solid var(--red); }
+  #charttip { position: fixed; z-index: 9; display: none; pointer-events: none; background: var(--card); color: var(--text);
+    border: 1px solid var(--track); border-radius: 10px; box-shadow: var(--shadow); padding: 6px 10px; font-size: 12px; white-space: nowrap; }
   .foot { margin: 20px 0 4px; display: flex; align-items: center; justify-content: center; gap: 10px; font-size: 11.5px; color: var(--sub); flex-wrap: wrap; }
   .foot .sep { opacity: .45; }
   .foot a { color: var(--sub); text-decoration: none; border-bottom: 1px dashed var(--track); cursor: pointer; }
@@ -68,6 +74,15 @@
     低电量提醒阈值 <input id="lowInput" type="number" step="1"> %
     <button id="saveLowBtn">保存</button>
     <span class="tip">每分钟自动刷新 · 数据仅保存在本机</span>
+  </div>
+  <div class="settings">
+    <div class="grow">
+      <b>历史保留天数</b>
+      <span>超过天数的历史记录会被自动清理（天）</span>
+    </div>
+    <input id="histDaysInput" type="number" min="1" max="365" step="1">
+    <button id="saveDaysBtn">保存</button>
+    <button id="clearHistBtn" class="danger">清理历史记录</button>
   </div>
   <div class="foot">
     <span id="footVer">BatteryMonitor</span>
@@ -172,19 +187,23 @@ function fillCard(x, data){
 }
 
 // 时间轴走势图: x 按记录真实时刻, y 为电量; 网格线 0/50/100 + 首/中/末时刻刻度
+// 悬停: 记录每张图的命中元数据, mousemove 时找最近点显示 时间/电量 提示 + 竖线标记
+const chartMeta = {};
 function chartFor(k){
   const el = $('spark-' + k), range = $('range-' + k);
   if (!el) return;
-  const pts = historyData.filter(p => p && p.ok === 1 && typeof p.b === 'number' && (p.d ? p.d === k : k === 'mchose')).slice(-360);
+  const pts = historyData.filter(p => p && p.ok === 1 && typeof p.b === 'number' && (p.d ? p.d === k : k === 'mchose')).slice(-1440);
   const w = 480, h = 96, padL = 26, padR = 8, padT = 6, padB = 16;
   if (pts.length < 2){
     el.innerHTML = `<text class="axis" x="${w/2}" y="${h/2}" text-anchor="middle">记录积累中…（每 10 分钟落一个点）</text>`;
     range.textContent = '';
+    delete chartMeta[k];
     return;
   }
   const t0 = pts[0].t, t1 = pts[pts.length - 1].t, span = (t1 - t0) || 1;
   const X = (t) => padL + (t - t0) / span * (w - padL - padR);
   const Y = (b) => padT + (1 - b / 100) * (h - padT - padB);
+  chartMeta[k] = { pts, X, Y };
   let s = '';
   for (const g of [100, 50, 0]){
     s += `<line class="grid" x1="${padL}" x2="${w - padR}" y1="${Y(g)}" y2="${Y(g)}"/>`;
@@ -220,6 +239,7 @@ function render(data){
   }
   for (const x of devs) fillCard(x, data);
   setInput($('lowInput'), data.lowThreshold ?? 20);
+  setInput($('histDaysInput'), data.historyDays ?? 30);
   $('updated').textContent = '更新于 ' + fmtTime(Date.now()) + (data.lastTry ? ' · 下次轮询约 ' + fmtTime(data.lastTry + 60000) : '');
   for (const x of devs) chartFor(x.key);
 }
@@ -251,6 +271,58 @@ $('saveLowBtn').addEventListener('click', async () => {
     body: JSON.stringify({ lowThreshold: Number($('lowInput').value) || 20 }) });
   refresh();
 });
+$('saveDaysBtn').addEventListener('click', async () => {
+  await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ historyDays: Number($('histDaysInput').value) || 30 }) });
+  refreshHistory(); refresh();
+});
+$('clearHistBtn').addEventListener('click', async () => {
+  if (!confirm('确定清空全部电量历史记录？此操作不可恢复。')) return;
+  await fetch('/api/clear-history', { method: 'POST' });
+  historyData = [];
+  hideTip();
+  renderHistory();
+  refresh();
+});
+
+// ---- 折线悬停提示: 最近点 → 时间 + 电量 ----
+const tip = document.createElement('div');
+tip.id = 'charttip';
+document.body.appendChild(tip);
+function hideTip(){
+  tip.style.display = 'none';
+  document.querySelectorAll('.hovermark').forEach((n) => n.remove());
+}
+document.addEventListener('mousemove', (e) => {
+  const svg = e.target && e.target.closest ? e.target.closest('svg[id^="spark-"]') : null;
+  if (!svg){ hideTip(); return; }
+  const k = svg.id.slice(6);
+  const meta = chartMeta[k];
+  if (!meta || meta.pts.length < 2){ hideTip(); return; }
+  const r = svg.getBoundingClientRect();
+  if (r.width < 4){ hideTip(); return; }
+  const vx = (e.clientX - r.left) / r.width * 480;   // viewBox 坐标(preserveAspectRatio=none)
+  let best = null, bd = Infinity;
+  for (const p of meta.pts){
+    const d = Math.abs(meta.X(p.t) - vx);
+    if (d < bd){ bd = d; best = p; }
+  }
+  if (!best || bd > 24){ hideTip(); return; }        // 离折线太远不提示
+  const d = new Date(best.t);
+  const hm = String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+  tip.textContent = (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + hm + ' · ' + Math.round(best.b) + '%' + (best.c ? ' · 充电中' : '');
+  tip.style.display = 'block';
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.min(e.clientX + 14, window.innerWidth - tw - 8) + 'px';
+  tip.style.top = Math.max(e.clientY - th - 12, 6) + 'px';
+  // 竖线 + 空心圆标记(重渲染会清掉, 移动时重建)
+  document.querySelectorAll('.hovermark').forEach((n) => n.remove());
+  const mx = meta.X(best.t).toFixed(1), my = meta.Y(best.b).toFixed(1);
+  svg.insertAdjacentHTML('beforeend',
+    `<g class="hovermark"><line x1="${mx}" x2="${mx}" y1="4" y2="82" stroke="${C.blue}" stroke-width="1" stroke-dasharray="3 3" opacity=".55"/>` +
+    `<circle cx="${mx}" cy="${my}" r="3.5" fill="var(--card)" stroke="${C.blue}" stroke-width="2"/></g>`);
+});
+window.addEventListener('scroll', hideTip, { passive: true });
 
 refresh(); refreshHistory();
 setInterval(refresh, 5000);

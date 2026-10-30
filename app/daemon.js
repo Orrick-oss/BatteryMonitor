@@ -36,7 +36,7 @@ for (const sig of ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection
 }
 
 // ---------- 配置 ----------
-const DEFAULT_CFG = { port: 8787, pollMs: 60000, batteryOffset: 0, lowThreshold: 20, autoOpen: false, offsets: {} };
+const DEFAULT_CFG = { port: 8787, pollMs: 60000, batteryOffset: 0, lowThreshold: 20, autoOpen: false, offsets: {}, historyDays: 30 };
 let cfg = { ...DEFAULT_CFG };
 try { Object.assign(cfg, JSON.parse(fs.readFileSync(CFG_PATH, 'utf8'))); } catch { }
 cfg.offsets = { ...DEFAULT_CFG.offsets, ...(cfg.offsets || {}) };
@@ -53,7 +53,7 @@ function offsetFor(key) {
 function loadHistory() {
   try {
     const lines = fs.readFileSync(HIST_PATH, 'utf8').trim().split('\n');
-    return lines.slice(-2000).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    return lines.slice(-20000).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
   } catch { return []; }
 }
 let history = loadHistory();
@@ -64,15 +64,38 @@ const lastRecordT = new Map();
 function record(rec) {
   rec.t = Date.now();
   history.push(rec);
-  if (history.length > 5000) history = history.slice(-4000);
+  if (history.length > 20000) history = history.slice(-18000); // 兜底上限(正常由保留天数清理)
   // 合并写盘: 500ms 内的多条合一次 flush
   histQueue.push(rec);
   clearTimeout(histFlushTimer);
-  histFlushTimer = setTimeout(() => {
-    const lines = histQueue.splice(0).map((r) => JSON.stringify(r)).join('\n') + '\n';
-    fs.appendFile(HIST_PATH, lines, () => { });
-  }, 500);
+  histFlushTimer = setTimeout(flushHistQueue, 500);
 }
+function flushHistQueue() {
+  clearTimeout(histFlushTimer);
+  if (!histQueue.length) return;
+  const lines = histQueue.splice(0).map((r) => JSON.stringify(r)).join('\n') + '\n';
+  try { fs.appendFileSync(HIST_PATH, lines); } catch { }
+}
+
+// 历史保留天数: 超过 cfg.historyDays 天的记录自动清理(内存 + history.jsonl 重写)
+function histDays() {
+  const v = Math.round(Number(cfg.historyDays));
+  return Number.isFinite(v) ? Math.max(1, Math.min(365, v)) : 30;
+}
+function applyRetention() {
+  const cutoff = Date.now() - histDays() * 86400e3;
+  const kept = history.filter((r) => r && r.t >= cutoff);
+  if (kept.length === history.length) return;
+  flushHistQueue(); // 先落盘挂起记录, 避免重写时丢失/复活
+  const removed = history.length - kept.length;
+  history = kept;
+  try {
+    fs.writeFileSync(HIST_PATH, history.map((r) => JSON.stringify(r)).join('\n') + (history.length ? '\n' : ''));
+    log(`[历史] 按保留 ${histDays()} 天清理: 移除 ${removed} 条, 剩余 ${history.length} 条`);
+  } catch (e) { log('[历史] 清理写盘失败: ' + e.message); }
+}
+setInterval(applyRetention, 3600e3);
+applyRetention(); // 启动时先清一次(兼容历史遗留的超期数据)
 
 // ---------- 状态（多设备） ----------
 // state.devices: Map(key → { key, brand, device, ok, battery, charging, full, mode, linked, error, lastOk, lowAlerted })
@@ -434,9 +457,17 @@ const server = http.createServer((req, res) => {
       primaryKey: p ? p.key : null,
       devices: deviceList(),
       offset: cfg.batteryOffset, offsets: cfg.offsets, lowThreshold: cfg.lowThreshold,
+      historyDays: histDays(),
     });
   }
   if (url === '/api/history') return json(res, history);
+  if (url === '/api/clear-history' && req.method === 'POST') {   // 手动清空全部电量历史(状态页"清理历史记录")
+    flushHistQueue();
+    history = [];
+    try { fs.writeFileSync(HIST_PATH, ''); } catch { }
+    log('[历史] 手动清空全部记录');
+    return json(res, { ok: true });
+  }
   if (url === '/api/appinfo') {
     return json(res, {
       app: 'BatteryMonitor', version: APP_VERSION, installDir: INSTALL_DIR,
@@ -467,6 +498,10 @@ const server = http.createServer((req, res) => {
           cfg.offsets.mchose = cfg.batteryOffset; // 旧版页面偏移输入框兼容
         }
         if (Number.isFinite(p.lowThreshold)) cfg.lowThreshold = clamp(Math.round(p.lowThreshold), 1, 99); // 完全自定义, 不再限定 5-50
+        if (Number.isFinite(p.historyDays)) {
+          cfg.historyDays = clamp(Math.round(p.historyDays), 1, 365);
+          applyRetention(); // 缩短保留天数时立即清理
+        }
         saveCfg();
         for (const ds of state.devices.values()) ds.lowAlerted = false;
         poll('manual');
