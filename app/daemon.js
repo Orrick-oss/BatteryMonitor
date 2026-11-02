@@ -123,12 +123,22 @@ function tooltipText() {
 
 // 托盘图标取"最值得展示"的设备: 在线 > 成功读数 > 第一个在场
 // 低电量报警需连续 LOW_STREAK 轮满足条件才触发:
-// 充电标志是接收器帧里的单个 bit, 插电后要延迟 1~2 轮才置位且偶发丢位;
-// 若单轮即报, 充电中一次丢位 + 电量尚在阈值下 → 误弹"请尽快充电"。
-const LOW_STREAK = 2;
+// 充电标志是接收器帧里的单个 bit, 插电后要延迟 1~2 轮才置位且偶发丢位。
+// 充电冷却: 观察到充电后 CHARGE_GRACE 内完全禁止报警(每次观察到充电都续期),
+// 充电中丢位一两轮(60s/轮)熬不过冷却期 → 充电期间绝无误报。
+const LOW_STREAK = 3;
+const CHARGE_GRACE = 10 * 60e3;
 function checkLowBattery(ds) {
-  const active = ds.ok && ds.linked && !ds.charging && !ds.full && ds.battery !== null;
-  if (active && ds.battery <= cfg.lowThreshold) {
+  const now = Date.now();
+  if (ds.charging) {
+    ds.lastChargingAt = now; // 充电冷却起点(续期)
+    ds.lowStreak = 0;
+    ds.lowAlerted = false;   // 充电即解除, 拔掉后可重新报
+    return;
+  }
+  const active = ds.ok && ds.linked && !ds.full && ds.battery !== null;
+  const cooling = ds.lastChargingAt && now - ds.lastChargingAt < CHARGE_GRACE;
+  if (active && ds.battery <= cfg.lowThreshold && !cooling) {
     ds.lowStreak = (ds.lowStreak || 0) + 1;
     if (ds.lowStreak >= LOW_STREAK && !ds.lowAlerted) {
       ds.lowAlerted = true;
@@ -136,13 +146,14 @@ function checkLowBattery(ds) {
     }
   } else {
     ds.lowStreak = 0;
-    // 报警状态的解除: 不在场/恢复充电/电量回升超阈值+5
+    // 报警状态的解除: 不在场/电量回升超阈值+5
     if (!active || ds.battery > cfg.lowThreshold + 5) ds.lowAlerted = false;
   }
 }
 
 function notify(title, msg) {
   console.log(`\x07 [提醒] ${title} — ${msg}`);
+  try { log(`[提醒] ${title} — ${msg}`); } catch { }
   try { if (tray) { tray.notify(title, msg); return; } } catch { }
   // 兜底: 托盘不可用时走 PowerShell 气泡
   try {
