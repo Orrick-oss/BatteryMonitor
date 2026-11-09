@@ -142,7 +142,9 @@ function checkLowBattery(ds) {
     ds.lowStreak = (ds.lowStreak || 0) + 1;
     if (ds.lowStreak >= LOW_STREAK && !ds.lowAlerted) {
       ds.lowAlerted = true;
-      notify(`${ds.device} 电量低：${ds.battery}%`, '请尽快充电');
+      // 文案带触发时间: Windows 通知中心的气泡会长期滞留, 旧通知一眼可辨
+      const hhmm = new Date().toTimeString().slice(0, 5);
+      notify(`${ds.device} 电量低：${ds.battery}%`, `请尽快充电（${hhmm} 提醒）`);
     }
   } else {
     ds.lowStreak = 0;
@@ -200,7 +202,14 @@ async function poll(trigger = 'timer') {
         checkLowBattery(ds);
       } else {
         Object.assign(ds, { ok: false, linked: false, present: true, error: r.message });
-        record({ d: key, ok: 0, err: r.reason });
+        // 失败记录节流: 离线时每轮都记曾把历史刷成 98% 垃圾(ok=0 每 20s 一条);
+        // 状态翻转立即记, 持续离线每 10 分钟记一条即可
+        const lastT = lastRecordT.get(key) || 0;
+        const wasOk = ds.lastOk && Date.now() - ds.lastOk < 2 * 60 * 1000;
+        if (wasOk || trigger === 'manual' || trigger === 'boot' || Date.now() - lastT > 10 * 60 * 1000) {
+          lastRecordT.set(key, Date.now());
+          record({ d: key, ok: 0, err: r.reason });
+        }
       }
     }
     // 本轮未出现的设备: 标记接收器未连接
