@@ -142,14 +142,41 @@ function checkLowBattery(ds) {
     ds.lowStreak = (ds.lowStreak || 0) + 1;
     if (ds.lowStreak >= LOW_STREAK && !ds.lowAlerted) {
       ds.lowAlerted = true;
-      // 文案带触发时间: Windows 通知中心的气泡会长期滞留, 旧通知一眼可辨
       const hhmm = new Date().toTimeString().slice(0, 5);
-      notify(`${ds.device} 电量低：${ds.battery}%`, `请尽快充电（${hhmm} 提醒）`);
+      // tag = bm-<设备>: 开始充电时发同 tag 通知即自动顶掉本条(见 toastNotify)
+      toastNotify(`bm-${ds.key}`, `${ds.device} 电量低`, `当前 ${ds.battery}%，请尽快充电（${hhmm} 提醒）`);
     }
   } else {
     ds.lowStreak = 0;
     // 报警状态的解除: 不在场/电量回升超阈值+5
     if (!active || ds.battery > cfg.lowThreshold + 5) ds.lowAlerted = false;
+  }
+}
+
+// 带标签的 WinRT Toast: 同 tag 新通知会把通知中心旧通知"顶掉"。
+// 用途: 低电提醒(bm-<key>) → 开始充电时发同 tag 通知, 旧"电量低"自动消失。
+// AUMID 在注册表注册(HKCU\Software\Classes\AppUserModelId), 免开始菜单快捷方式。
+const TOAST_AUMID = 'Orrick.BatteryMonitor';
+function toastNotify(tag, title, msg) {
+  console.log(`\x07 [提醒] ${title} — ${msg}`);
+  try { log(`[提醒] ${title} — ${msg}`); } catch { }
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const script = `
+$ErrorActionPreference='Stop'
+[void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+[void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+$x = New-Object Windows.Data.Xml.Dom.XmlDocument
+$x.LoadXml("<toast><visual><binding template='ToastText02'><text id='1'>${esc(title)}</text><text id='2'>${esc(msg)}</text></binding></visual></toast>")
+$t = New-Object Windows.UI.Notifications.ToastNotification $x
+$t.Tag = '${tag}'
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${TOAST_AUMID}').Show($t)
+`;
+  try {
+    spawn('powershell', ['-NoProfile', '-NonInteractive', '-EncodedCommand',
+      Buffer.from(script, 'utf16le').toString('base64')],
+      { stdio: 'ignore', windowsHide: true, timeout: 20000 }).unref();
+  } catch (e) {
+    try { log(`[提醒] toast 发送失败: ${e.message}`); } catch { }
   }
 }
 
@@ -193,7 +220,12 @@ async function poll(trigger = 'timer') {
           millivolts: r.millivolts, error: null, lastOk: Date.now(),
         };
         if (r.kind) patch.kind = r.kind; // 鼠标/键盘, 托盘角标和页面卡片用
+        const wasCharging = ds.charging;
         Object.assign(ds, patch);
+        // 开始充电 → 发同 tag "正在充电"通知, 自动顶掉通知中心里滞留的旧"电量低"
+        if (charging && !wasCharging && ds.linked && ds.battery !== null) {
+          toastNotify(`bm-${key}`, `${ds.device} 正在充电`, `当前 ${battery}% ⚡`);
+        }
         const lastT = lastRecordT.get(key) || 0;
         if (changed || trigger === 'manual' || trigger === 'boot' || Date.now() - lastT > 10 * 60 * 1000) {
           lastRecordT.set(key, Date.now());
@@ -563,6 +595,13 @@ server.on('error', (e) => {
 
 server.listen(cfg.port, '127.0.0.1', () => {
   log(`状态页: http://127.0.0.1:${cfg.port}  (轮询 ${cfg.pollMs / 1000}s, 低电量阈值 ${cfg.lowThreshold}%)`);
+  // 注册通知应用身份(AUMID), 幂等; 通知中心来源显示"BatteryMonitor"
+  try {
+    require('child_process').execFileSync('reg',
+      ['add', `HKCU\\Software\\Classes\\AppUserModelId\\${TOAST_AUMID}`,
+        '/v', 'DisplayName', '/t', 'REG_SZ', '/d', 'BatteryMonitor', '/f'],
+      { stdio: 'ignore', timeout: 5000 });
+  } catch { /* 注册失败不影响主流程, toast 可能不显示来源名 */ }
   refreshAutoStart(); // 先读自启状态(含旧启动项迁移), 菜单首建时勾选态才正确
   initTray();
   hovercard.init({
